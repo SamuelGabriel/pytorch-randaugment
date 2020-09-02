@@ -1,5 +1,6 @@
 import logging
 import warnings
+import torch
 
 formatter = logging.Formatter('[%(asctime)s] [%(name)s] [%(levelname)s] %(message)s')
 warnings.filterwarnings("ignore", "(Possibly )?corrupt EXIF data", UserWarning)
@@ -21,3 +22,11 @@ def add_filehandler(logger, filepath):
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(formatter)
     logger.addHandler(fh)
+
+def get_sum_along_batch(model, attribute):
+    grad_list = []
+    for param in model.parameters():
+        ga = getattr(param, attribute, None)
+        if ga is not None:
+            grad_list.append(ga)
+    return torch.stack(grad_list).sum(0)

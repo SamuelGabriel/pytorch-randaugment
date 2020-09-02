@@ -1,2 +1,2 @@
 
-from RandAugment.augmentations import RandAugment
+from RandAugment.augmentations import get_randaugment

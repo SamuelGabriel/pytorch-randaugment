@@ -7,16 +7,21 @@ from collections import OrderedDict
 
 import torch
 from torch import nn, optim
+import torchvision
 from torch.nn.parallel.data_parallel import DataParallel
 
 from tqdm import tqdm
 from theconf import Config as C, ConfigArgumentParser
+from backpack import backpack, extend, memory_cleanup
+from backpack.extensions import BatchL2Grad
+from extensions.dot_align import DotAlignment
 
-from RandAugment.common import get_logger
+from RandAugment.common import get_logger, get_sum_along_batch
 from RandAugment.data import get_dataloaders
 from RandAugment.lr_scheduler import adjust_learning_rate_resnet
 from RandAugment.metrics import accuracy, Accumulator
 from RandAugment.networks import get_model, num_class
+from RandAugment.preprocessors import LearnedPreprocessorRandaugmentSpace, StandardCIFARPreprocessor
 from warmup_scheduler import GradualWarmupScheduler
 
 from RandAugment.common import add_filehandler
@@ -25,7 +30,7 @@ logger = get_logger('RandAugment')
 logger.setLevel(logging.INFO)
 
 
-def run_epoch(model, loader, loss_fn, optimizer, desc_default='', epoch=0, writer=None, verbose=1, scheduler=None):
+def run_epoch(model, loader, loss_fn, optimizer, desc_default='', epoch=0, writer=None, verbose=1, scheduler=None, preprocessor=None):
     tqdm_disable = bool(os.environ.get('TASK_NAME', ''))    # KakaoBrain Environment
     if verbose:
         loader = tqdm(loader, disable=tqdm_disable)
@@ -35,8 +40,12 @@ def run_epoch(model, loader, loss_fn, optimizer, desc_default='', epoch=0, write
     cnt = 0
     total_steps = len(loader)
     steps = 0
+    backpack_state = {}
     for data, label in loader:
         steps += 1
+        if preprocessor:
+            data = [torchvision.transforms.ToPILImage()(ti) for ti in data]
+            data = preprocessor(data,epoch - 1 + float(steps) / total_steps)
         data, label = data.cuda(), label.cuda()
 
         if optimizer:
@@ -46,7 +55,20 @@ def run_epoch(model, loader, loss_fn, optimizer, desc_default='', epoch=0, write
         loss = loss_fn(preds, label)
 
         if optimizer:
-            loss.backward()
+            if 'alignment_loss' in C.get():
+                alignment_loss_flags = C.get()['alignment_loss']
+                with backpack(DotAlignment(len(data), 0, backpack_state, 'remove_me' == alignment_loss_flags['summation'],
+                                           'normalized' == alignment_loss_flags['summation'],
+                                           'cossim' == alignment_loss_flags['alignment_type'], align_with=alignment_loss_flags['align_with'])):
+                    loss.backward()
+                if '2' not in alignment_loss_flags['align_with'] or steps > 1:
+                    ga = get_sum_along_batch(model, 'grad_alignments')
+                else:
+                    ga = None
+            else:
+                loss.backward()
+            if hasattr(preprocessor, 'step') and ga is not None and optimizer:
+                preprocessor.step(ga)
             if C.get()['optimizer'].get('clip', 5) > 0:
                 nn.utils.clip_grad_norm_(model.parameters(), C.get()['optimizer'].get('clip', 5))
             optimizer.step()
@@ -89,7 +111,7 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
         reporter = lambda **kwargs: 0
 
     max_epoch = C.get()['epoch']
-    trainsampler, trainloader, validloader, testloader_ = get_dataloaders(C.get()['dataset'], C.get()['batch'], dataroot, test_ratio, split_idx=cv_fold)
+    trainsampler, trainloader, validloader, testloader_, dataset_info = get_dataloaders(C.get()['dataset'], C.get()['batch'], dataroot, test_ratio, split_idx=cv_fold)
 
     # create a model & an optimizer
     model = get_model(C.get()['model'], num_class(C.get()['dataset']))
@@ -128,6 +150,50 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
     else:
         from tensorboardX import SummaryWriter
     writers = [SummaryWriter(log_dir='./logs/%s/%s' % (tag, x)) for x in ['train', 'valid', 'test']]
+    def get_meta_optimizer_factory():
+        meta_flags = C.get()['meta_opt']
+        if 'meta_optimizer' in meta_flags:
+            mo_flags = meta_flags['meta_optimizer']
+            if mo_flags['type'] == 'adam':
+                def get_meta_optimizer(es_optimized_variables):
+                    return torch.optim.Adam(es_optimized_variables, lr=mo_flags['lr'], betas=(mo_flags['beta1'],mo_flags['beta2']))
+            elif mo_flags['type'] == 'sgd':
+                def get_meta_optimizer(es_optimized_variables):
+                    return torch.optim.SGD(es_optimized_variables, lr=mo_flags['lr'], momentum=mo_flags['beta1'])
+            else:
+                raise ValueError()
+        else:
+            raise ValueError()
+        return get_meta_optimizer
+    if 'preprocessor' in C.get():
+        preprocessor_flags = C.get()['preprocessor']
+        preprocessor_type = C.get()['preprocessor']['type']
+        if preprocessor_type == 'learned_randaugmentspace':
+            importance_sampling = False
+            assert not preprocessor_flags.get('online_tests_on_model')
+            image_preprocessor = LearnedPreprocessorRandaugmentSpace(dataset_info,
+                                                                     preprocessor_flags['hidden_dim'],
+                                                                     get_meta_optimizer_factory(),
+                                                                     preprocessor_flags['entropy_alpha'],
+                                                                     scale_entropy_alpha=preprocessor_flags['scale_entropy_alpha'],
+                                                                     cutout=C.get().get('cutout', 0),
+                                                                     importance_sampling=importance_sampling,
+                                                                     normalize_reward=preprocessor_flags.get('normalize_reward',True),
+                                                                     model_for_online_tests=None,
+                                                                     q_zero_init=preprocessor_flags['q_zero_init'],
+                                                                     scale_embs_zero_init=preprocessor_flags.get('scale_embs_zero_init',False),
+                                                                     q_residual=preprocessor_flags.get('q_residual',False),
+                                                                     label_smoothing_rate=preprocessor_flags.get('label_smoothing_rate',0.),
+                                                                     device=torch.device('cuda:0'),
+                                                                     summary_writer=writers[0])
+        elif preprocessor_type == 'standard_cifar':
+            image_preprocessor = StandardCIFARPreprocessor(dataset_info, C.get().get('cutout', 0))
+        else:
+            raise NotImplementedError()
+    else:
+        image_preprocessor = None
+
+
 
     result = OrderedDict()
     epoch_start = 1
@@ -154,10 +220,13 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
         if only_eval:
             logger.warning('model checkpoint not found. only-evaluation mode is off.')
         only_eval = False
+    if 'meta_opt' in C.get():
+        model = extend(model)
 
     if only_eval:
         logger.info('evaluation only+')
         model.eval()
+        if image_preprocessor: image_preprocessor.eval()
         rs = dict()
         rs['train'] = run_epoch(model, trainloader, criterion, None, desc_default='train', epoch=0, writer=writers[0])
         rs['valid'] = run_epoch(model, validloader, criterion, None, desc_default='valid', epoch=0, writer=writers[1])
@@ -173,16 +242,18 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
     best_top1 = 0
     for epoch in range(epoch_start, max_epoch + 1):
         model.train()
+        if image_preprocessor: image_preprocessor.train()
         rs = dict()
-        rs['train'] = run_epoch(model, trainloader, criterion, optimizer, desc_default='train', epoch=epoch, writer=writers[0], verbose=True, scheduler=scheduler)
+        rs['train'] = run_epoch(model, trainloader, criterion, optimizer, desc_default='train', epoch=epoch, writer=writers[0], verbose=True, scheduler=scheduler, preprocessor=image_preprocessor)
         model.eval()
+        if image_preprocessor: image_preprocessor.eval()
 
         if math.isnan(rs['train']['loss']):
             raise Exception('train loss is NaN.')
 
         if epoch % 5 == 0 or epoch == max_epoch:
-            rs['valid'] = run_epoch(model, validloader, criterion, None, desc_default='valid', epoch=epoch, writer=writers[1], verbose=True)
-            rs['test'] = run_epoch(model, testloader_, criterion, None, desc_default='*test', epoch=epoch, writer=writers[2], verbose=True)
+            rs['valid'] = run_epoch(model, validloader, criterion, None, desc_default='valid', epoch=epoch, writer=writers[1], verbose=True, preprocessor=image_preprocessor)
+            rs['test'] = run_epoch(model, testloader_, criterion, None, desc_default='*test', epoch=epoch, writer=writers[2], verbose=True, preprocessor=image_preprocessor)
 
             if metric == 'last' or rs[metric]['top1'] > best_top1:
                 if metric != 'last':

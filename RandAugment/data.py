@@ -13,7 +13,7 @@ from RandAugment.augmentations import *
 from RandAugment.common import get_logger
 from RandAugment.imagenet import ImageNet
 
-from RandAugment.augmentations import Lighting, RandAugment
+from RandAugment.augmentations import Lighting
 
 logger = get_logger('RandAugment')
 logger.setLevel(logging.INFO)
@@ -29,6 +29,7 @@ _CIFAR_MEAN, _CIFAR_STD = (0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)
 
 
 def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0):
+    dataset_info = {}
     if 'cifar' in dataset or 'svhn' in dataset:
         transform_train = transforms.Compose([
             transforms.RandomCrop(32, padding=4),
@@ -40,6 +41,9 @@ def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0):
             transforms.ToTensor(),
             transforms.Normalize(_CIFAR_MEAN, _CIFAR_STD),
         ])
+        dataset_info['mean'] = _CIFAR_MEAN
+        dataset_info['std'] = _CIFAR_STD
+        dataset_info['img_dims'] = (3,32,32)
     elif 'imagenet' in dataset:
         transform_train = transforms.Compose([
             transforms.RandomResizedCrop(224, scale=(0.08, 1.0), interpolation=Image.BICUBIC),
@@ -74,6 +78,11 @@ def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0):
 
     if C.get()['cutout'] > 0:
         transform_train.transforms.append(CutoutDefault(C.get()['cutout']))
+
+    if 'preprocessor' in C.get():
+        print("Not using any transforms in dataset, since preprocessor is active.")
+        transform_train = transforms.ToTensor()
+        transform_test = transforms.ToTensor()
 
     if dataset == 'cifar10':
         total_trainset = torchvision.datasets.CIFAR10(root=dataroot, train=True, download=True, transform=transform_train)
@@ -113,7 +122,7 @@ def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0):
         testset, batch_size=batch, shuffle=False, num_workers=32, pin_memory=True,
         drop_last=False
     )
-    return train_sampler, trainloader, validloader, testloader
+    return train_sampler, trainloader, validloader, testloader, dataset_info
 
 
 class SubsetSampler(Sampler):
