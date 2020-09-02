@@ -34,6 +34,7 @@ class DotAlignConv2d(BatchGradBase, StatehandlingMeta):
             def hook(grad):
                 module.weight.grad_alignments = self.align_func_conv(module.o_input0, module.o_g_out, module.c_input0, module.c_g_out,
                                                                      module, curr_grad=grad)
+                module.backward_weight_hook.remove()
                 del module.o_input0, module.o_g_out, module.c_input0, module.c_g_out
             module.backward_weight_hook = module.weight.register_hook(hook)
 
