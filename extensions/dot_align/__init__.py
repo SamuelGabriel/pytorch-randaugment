@@ -1,5 +1,6 @@
 import torch
 from torch.nn import BatchNorm1d, Conv2d, Linear
+from torch.nn import functional as F
 
 from backpack.extensions.backprop_extension import BackpropExtension
 from .conv2d_derivatives import Conv2DDerivatives
@@ -112,18 +113,8 @@ class ComputeAlignmentConv():
     def grad_alignment(self, comparison_grad, X, dE_dY, conv):
         dot_prod = contract('bcwh,bcwh->b',conv(X,comparison_grad),dE_dY)
         return dot_prod
-        #sums = contract("nai,oa->noi", X, comparison_grad)
-        #dot_prod = contract("noi,noi->n", dE_dY, sums)
-        if self.remove_me_summation or self.cossim:
-            squared_grad_norms = contract("nml,nkl,nmi,nki->n", dE_dY, X, dE_dY, X)
-            if self.remove_me_summation:
-                return dot_prod - squared_grad_norms
-            else:
-                squared_grad_norm = (comparison_grad ** 2).sum()
-                return dot_prod / (squared_grad_norm * squared_grad_norms).sqrt()
-        return dot_prod
 
-    def __call__(self, X, dE_dY, comparison_X, comparison_dE_dY, module):
+    def __call__(self, X, dE_dY, comparison_X, comparison_dE_dY, module, curr_grad=None):
         # It should work for other cases, but rather first test it.
         assert len(comparison_dE_dY) == 1 and len(dE_dY) == 1
         dE_dY = dE_dY[0]
@@ -146,28 +137,21 @@ class ComputeAlignmentConv():
             comparison_this_X = X
             comparison_this_dE_dY = dE_dY
 
-        comparison_grad = Conv2DDerivatives().weight_jac_t_mat_prod(module,comparison_X,(comparison_dE_dY,),comparison_dE_dY,sum_batch=True)
+        #print('start hand-compute gradient')
+        #comp_ga = Conv2DDerivatives().weight_jac_t_mat_prod(module,comparison_X,(comparison_dE_dY,),comparison_dE_dY,sum_batch=True)
+        #print('end hand-compute gradient')
+        #comparison_grad = torch.nn.grad.conv2d_weight(comparison_X,module.weight.shape,comparison_dE_dY)
+        def get_grad(X,dE_dY):
+            with torch.enable_grad():
+                return torch.autograd.grad(conv(X, module.weight), module.weight, dE_dY)[0]
+        if curr_grad is not None and not self.val_bs:
+            comparison_grad = curr_grad
+        else:
+            comparison_grad = get_grad(comparison_X,comparison_dE_dY)
         if self.compare_to_difference:
-            comparison_grad = comparison_grad - Conv2DDerivatives().weight_jac_t_mat_prod(module,comparison_this_X,(comparison_this_dE_dY,),comparison_this_dE_dY,sum_batch=True)
+            comparison_grad = comparison_grad - get_grad(comparison_this_X,comparison_this_dE_dY)
         #print('comp grad', comparison_grad.numel(), comparison_grad.flatten())
         ga = self.grad_alignment(comparison_grad, X, dE_dY, conv)
-        return ga
-
-
-
-        if self.normalized_summation:
-            squared_grad_norms = contract("nml,nkl,nmi,nki->n", comparison_dE_dY, comparison_X, comparison_dE_dY,
-                                          comparison_X)
-            comparison_X = comparison_X / squared_grad_norms.sqrt().unsqueeze_(1).unsqueeze_(1)
-        comparison_grad = contract("noi,nai->oa", comparison_dE_dY, comparison_X)
-        if self.compare_to_difference:
-            if self.normalized_summation:
-                squared_grad_norms = contract("nml,nkl,nmi,nki->n", comparison_this_dE_dY, comparison_this_X,
-                                              comparison_this_dE_dY, comparison_this_X)
-                comparison_this_X = comparison_this_X / squared_grad_norms.sqrt().unsqueeze_(1).unsqueeze_(1)
-            comparison_grad = comparison_grad - contract("noi,nai->oa", comparison_this_dE_dY, comparison_this_X)
-
-        ga = self.grad_alignment(comparison_grad, X, dE_dY)
         return ga
 
 
