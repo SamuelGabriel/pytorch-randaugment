@@ -45,7 +45,7 @@ class WideBasic(nn.Module):
 
 
 class WideResNet(nn.Module):
-    def __init__(self, depth, widen_factor, dropout_rate, num_classes):
+    def __init__(self, depth, widen_factor, dropout_rate, num_classes, adaptive_dropouter_creator):
         super(WideResNet, self).__init__()
         self.in_planes = 16
 
@@ -61,6 +61,10 @@ class WideResNet(nn.Module):
         self.layer3 = self._wide_layer(WideBasic, nStages[3], n, dropout_rate, stride=2)
         self.bn1 = nn.BatchNorm2d(nStages[3], momentum=_bn_momentum)
         self.linear = nn.Linear(nStages[3], num_classes)
+        if adaptive_dropouter_creator is not None:
+            self.adaptive_dropouter = adaptive_dropouter_creator(nStages[3])
+        else:
+            self.adaptive_dropouter = lambda x: x
 
         # self.apply(conv_init)
 
@@ -83,6 +87,7 @@ class WideResNet(nn.Module):
         # out = F.avg_pool2d(out, 8)
         out = F.adaptive_avg_pool2d(out, (1, 1))
         out = out.view(out.size(0), -1)
+        out = self.adaptive_dropouter(out)
         out = self.linear(out)
 
         return out

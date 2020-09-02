@@ -54,6 +54,8 @@ def run_epoch(model, loader, loss_fn, optimizer, desc_default='', epoch=0, write
         preds = model(data)
         if 'test' in desc_default:
             recursive_backpack_memory_cleanup(model)
+        #print([p for p in model.parameters() if p.device != torch.device('cuda:0')])
+        #print([p for p in model.buffers() if p.device != torch.device('cuda:0')])
         loss = loss_fn(preds, label)
 
         if optimizer:
@@ -69,8 +71,11 @@ def run_epoch(model, loader, loss_fn, optimizer, desc_default='', epoch=0, write
                     ga = None
             else:
                 loss.backward()
-            if hasattr(preprocessor, 'step') and ga is not None and optimizer:
-                preprocessor.step(ga)
+            if ga is not None and optimizer:
+                if hasattr(preprocessor, 'step'):
+                    preprocessor.step(ga)
+                if hasattr(model, 'adaptive_dropouter') and hasattr(model.adaptive_dropouter, 'step'):
+                    model.adaptive_dropouter.step(ga)
             if C.get()['optimizer'].get('clip', 5) > 0:
                 nn.utils.clip_grad_norm_(model.parameters(), C.get()['optimizer'].get('clip', 5))
             optimizer.step()
@@ -114,9 +119,24 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
 
     max_epoch = C.get()['epoch']
     trainsampler, trainloader, validloader, testloader_, dataset_info = get_dataloaders(C.get()['dataset'], C.get()['batch'], dataroot, test_ratio, split_idx=cv_fold)
+    def get_meta_optimizer_factory():
+        meta_flags = C.get()['meta_opt']
+        if 'meta_optimizer' in meta_flags:
+            mo_flags = meta_flags['meta_optimizer']
+            if mo_flags['type'] == 'adam':
+                def get_meta_optimizer(es_optimized_variables):
+                    return torch.optim.Adam(es_optimized_variables, lr=mo_flags['lr'], betas=(mo_flags['beta1'],mo_flags['beta2']))
+            elif mo_flags['type'] == 'sgd':
+                def get_meta_optimizer(es_optimized_variables):
+                    return torch.optim.SGD(es_optimized_variables, lr=mo_flags['lr'], momentum=mo_flags['beta1'])
+            else:
+                raise ValueError()
+        else:
+            raise ValueError()
+        return get_meta_optimizer
 
     # create a model & an optimizer
-    model = get_model(C.get()['model'], num_class(C.get()['dataset']))
+    model = get_model(C.get()['model'], get_meta_optimizer_factory(), num_class(C.get()['dataset']))
 
     criterion = nn.CrossEntropyLoss()
     if C.get()['optimizer']['type'] == 'sgd':
@@ -152,21 +172,6 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
     else:
         from tensorboardX import SummaryWriter
     writers = [SummaryWriter(log_dir='./logs/%s/%s' % (tag, x)) for x in ['train', 'valid', 'test']]
-    def get_meta_optimizer_factory():
-        meta_flags = C.get()['meta_opt']
-        if 'meta_optimizer' in meta_flags:
-            mo_flags = meta_flags['meta_optimizer']
-            if mo_flags['type'] == 'adam':
-                def get_meta_optimizer(es_optimized_variables):
-                    return torch.optim.Adam(es_optimized_variables, lr=mo_flags['lr'], betas=(mo_flags['beta1'],mo_flags['beta2']))
-            elif mo_flags['type'] == 'sgd':
-                def get_meta_optimizer(es_optimized_variables):
-                    return torch.optim.SGD(es_optimized_variables, lr=mo_flags['lr'], momentum=mo_flags['beta1'])
-            else:
-                raise ValueError()
-        else:
-            raise ValueError()
-        return get_meta_optimizer
     if 'preprocessor' in C.get():
         preprocessor_flags = C.get()['preprocessor']
         preprocessor_type = C.get()['preprocessor']['type']

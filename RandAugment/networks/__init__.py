@@ -11,9 +11,17 @@ from RandAugment.networks.shakeshake.shake_resnet import ShakeResNet
 from RandAugment.networks.wideresnet import WideResNet
 from RandAugment.networks.shakeshake.shake_resnext import ShakeResNeXt
 
+from RandAugment.adaptive_dropouter import AdaptiveDropouter
 
-def get_model(conf, num_class=10):
+
+def get_model(conf, optimizer_creator, num_class=10):
     name = conf['type']
+    if 'adaptive_dropouter' in conf:
+        assert name in ('wresnet28_10',)
+        ad_creator = lambda w: AdaptiveDropouter(w, conf['adaptive_dropouter']['hidden_size'], optimizer_creator)
+    else:
+        ad_creator = None
+
 
     if name == 'resnet50':
         model = ResNet(dataset='imagenet', depth=50, num_classes=num_class, bottleneck=True)
@@ -22,8 +30,7 @@ def get_model(conf, num_class=10):
     elif name == 'wresnet40_2':
         model = WideResNet(40, 2, dropout_rate=0.0, num_classes=num_class)
     elif name == 'wresnet28_10':
-        model = WideResNet(28, 10, dropout_rate=0.0, num_classes=num_class)
-
+        model = WideResNet(28, 10, dropout_rate=0.0, num_classes=num_class, adaptive_dropouter_creator=ad_creator)
     elif name == 'shakeshake26_2x32d':
         model = ShakeResNet(26, 32, num_class)
     elif name == 'shakeshake26_2x64d':
