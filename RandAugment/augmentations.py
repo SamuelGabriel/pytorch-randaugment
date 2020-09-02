@@ -1,123 +1,11 @@
 # code in this file is adpated from rpmcruz/autoaugment
 # https://github.com/rpmcruz/autoaugment/blob/master/transformations.py
-import random
 
 import PIL, PIL.ImageOps, PIL.ImageEnhance, PIL.ImageDraw
 import numpy as np
 import torch
 
-
-def ShearX(img, v):  # [-0.3, 0.3]
-    assert -0.3 <= v <= 0.3
-    if random.random() > 0.5:
-        v = -v
-    return img.transform(img.size, PIL.Image.AFFINE, (1, v, 0, 0, 1, 0))
-
-
-def ShearY(img, v):  # [-0.3, 0.3]
-    assert -0.3 <= v <= 0.3
-    if random.random() > 0.5:
-        v = -v
-    return img.transform(img.size, PIL.Image.AFFINE, (1, 0, 0, v, 1, 0))
-
-
-def TranslateX(img, v):  # [-150, 150] => percentage: [-0.45, 0.45]
-    assert -0.45 <= v <= 0.45
-    if random.random() > 0.5:
-        v = -v
-    v = v * img.size[0]
-    return img.transform(img.size, PIL.Image.AFFINE, (1, 0, v, 0, 1, 0))
-
-
-def TranslateY(img, v):  # [-150, 150] => percentage: [-0.45, 0.45]
-    assert -0.45 <= v <= 0.45
-    if random.random() > 0.5:
-        v = -v
-    v = v * img.size[1]
-    return img.transform(img.size, PIL.Image.AFFINE, (1, 0, 0, 0, 1, v))
-
-
-def TranslateXAbs(img, v):  # [-150, 150] => percentage: [-0.45, 0.45]
-    assert 0 <= v <= 10
-    if random.random() > 0.5:
-        v = -v
-    return img.transform(img.size, PIL.Image.AFFINE, (1, 0, v, 0, 1, 0))
-
-
-def TranslateYAbs(img, v):  # [-150, 150] => percentage: [-0.45, 0.45]
-    assert 0 <= v <= 10
-    if random.random() > 0.5:
-        v = -v
-    return img.transform(img.size, PIL.Image.AFFINE, (1, 0, 0, 0, 1, v))
-
-
-def Rotate(img, v):  # [-30, 30]
-    assert -30 <= v <= 30
-    if random.random() > 0.5:
-        v = -v
-    return img.rotate(v)
-
-
-def AutoContrast(img, _):
-    return PIL.ImageOps.autocontrast(img)
-
-
-def Invert(img, _):
-    return PIL.ImageOps.invert(img)
-
-
-def Equalize(img, _):
-    return PIL.ImageOps.equalize(img)
-
-
-def Flip(img, _):  # not from the paper
-    return PIL.ImageOps.mirror(img)
-
-
-def Solarize(img, v):  # [0, 256]
-    assert 0 <= v <= 256
-    return PIL.ImageOps.solarize(img, v)
-
-
-def Posterize(img, v):  # [4, 8]
-    assert 4 <= v <= 8
-    v = int(v)
-    return PIL.ImageOps.posterize(img, v)
-
-
-def Posterize2(img, v):  # [0, 4]
-    assert 0 <= v <= 4
-    v = int(v)
-    return PIL.ImageOps.posterize(img, v)
-
-
-def Contrast(img, v):  # [0.1,1.9]
-    assert 0.1 <= v <= 1.9
-    return PIL.ImageEnhance.Contrast(img).enhance(v)
-
-
-def Color(img, v):  # [0.1,1.9]
-    assert 0.1 <= v <= 1.9
-    return PIL.ImageEnhance.Color(img).enhance(v)
-
-
-def Brightness(img, v):  # [0.1,1.9]
-    assert 0.1 <= v <= 1.9
-    return PIL.ImageEnhance.Brightness(img).enhance(v)
-
-
-def Sharpness(img, v):  # [0.1,1.9]
-    assert 0.1 <= v <= 1.9
-    return PIL.ImageEnhance.Sharpness(img).enhance(v)
-
-
-def Cutout(img, v):  # [0, 60] => percentage: [0, 0.2]
-    assert 0.0 <= v <= 0.2
-    if v <= 0.:
-        return img
-
-    v = v * img.size[0]
-    return CutoutAbs(img, v)
+from RandAugment import google_augmentations
 
 
 def CutoutAbs(img, v):  # [0, 60] => percentage: [0, 0.2]
@@ -148,34 +36,6 @@ def SamplePairing(imgs):  # [0, 0.4]
         return PIL.Image.blend(img1, img2, v)
 
     return f
-
-
-def Identity(img, v):
-    return img
-
-
-def augment_list():  # 16 oeprations and their ranges
-    # https://github.com/google-research/uda/blob/master/image/randaugment/policies.py#L57
-    l = [
-        (Identity, 0., 1.0),
-        (ShearX, 0., 0.3),  # 0
-        (ShearY, 0., 0.3),  # 1
-        (TranslateX, 0., 0.45),  # 2
-        (TranslateY, 0., 0.45),  # 3
-        (Rotate, 0, 30),  # 4
-        (AutoContrast, 0, 1),  # 5
-        (Invert, 0, 1),  # 6
-        (Equalize, 0, 1),  # 7
-        (Solarize, 0, 256),  # 8
-        (Posterize, 4, 8),  # 9
-        # (Contrast, 0.1, 1.9),  # 10
-        (Color, 0.1, 1.9),  # 11
-        (Brightness, 0.1, 1.9),  # 12
-        (Sharpness, 0.1, 1.9),  # 13
-        # (Cutout, 0, 0.2),  # 14
-        # (SamplePairing(imgs), 0, 0.4),  # 15
-    ]
-    return l
 
 
 class Lighting(object):
@@ -224,16 +84,5 @@ class CutoutDefault(object):
         return img
 
 
-class RandAugment:
-    def __init__(self, n, m):
-        self.n = n
-        self.m = m      # [0, 30]
-        self.augment_list = augment_list()
-
-    def __call__(self, img):
-        ops = random.choices(self.augment_list, k=self.n)
-        for op, minval, maxval in ops:
-            val = (float(self.m) / 30) * float(maxval - minval) + minval
-            img = op(img, val)
-
-        return img
+def get_randaugment(n,m):
+    return google_augmentations.RandAugment(n, m)

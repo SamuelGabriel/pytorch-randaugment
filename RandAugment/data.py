@@ -65,7 +65,8 @@ def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0):
 
     logger.debug('augmentation: %s' % C.get()['aug'])
     if C.get()['aug'] == 'randaugment':
-        transform_train.transforms.insert(0, RandAugment(C.get()['randaug']['N'], C.get()['randaug']['M']))
+        assert not C.get()['randaug'].get('corrected_sample_space') and not C.get()['randaug'].get('google_augmentations')
+        transform_train.transforms.insert(0, get_randaugment(C.get()['randaug']['N'], C.get()['randaug']['M'], ))
     elif C.get()['aug'] in ['default', 'inception', 'inception320']:
         pass
     else:
