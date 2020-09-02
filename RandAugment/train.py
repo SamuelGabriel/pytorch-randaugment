@@ -24,7 +24,7 @@ from RandAugment.networks import get_model, num_class
 from RandAugment.preprocessors import LearnedPreprocessorRandaugmentSpace, StandardCIFARPreprocessor
 from warmup_scheduler import GradualWarmupScheduler
 
-from RandAugment.common import add_filehandler
+from RandAugment.common import add_filehandler, recursive_backpack_memory_cleanup
 
 logger = get_logger('RandAugment')
 logger.setLevel(logging.INFO)
@@ -52,6 +52,8 @@ def run_epoch(model, loader, loss_fn, optimizer, desc_default='', epoch=0, write
             optimizer.zero_grad()
 
         preds = model(data)
+        if 'test' in desc_default:
+            recursive_backpack_memory_cleanup(model)
         loss = loss_fn(preds, label)
 
         if optimizer:
@@ -220,8 +222,6 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
         if only_eval:
             logger.warning('model checkpoint not found. only-evaluation mode is off.')
         only_eval = False
-    if 'meta_opt' in C.get():
-        model = extend(model)
 
     if only_eval:
         logger.info('evaluation only+')
@@ -244,7 +244,7 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
         model.train()
         if image_preprocessor: image_preprocessor.train()
         rs = dict()
-        rs['train'] = run_epoch(model, trainloader, criterion, optimizer, desc_default='train', epoch=epoch, writer=writers[0], verbose=True, scheduler=scheduler, preprocessor=image_preprocessor)
+        rs['train'] = run_epoch(extend(model) if 'meta_opt' in C.get() else model, trainloader, criterion, optimizer, desc_default='train', epoch=epoch, writer=writers[0], verbose=True, scheduler=scheduler, preprocessor=image_preprocessor)
         model.eval()
         if image_preprocessor: image_preprocessor.eval()
 
