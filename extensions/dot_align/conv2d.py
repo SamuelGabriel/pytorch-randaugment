@@ -27,16 +27,18 @@ class DotAlignConv2d(BatchGradBase, StatehandlingMeta):
         if o_input0 is None:
             return None
         if self.align_func_conv:
-            module.o_input0, module.o_g_out, module.c_input0, module.c_g_out = o_input0.clone().detach(), tuple(t.clone().detach() for t in o_g_out), c_input0.clone().detach(), tuple(t.clone().detach() for t in c_g_out)
-            if not hasattr(module, 'backward_weight_hook'):
-                def hook(grad):
-                    module.weight.grad_alignments = self.align_func_conv(module.o_input0, module.o_g_out, module.c_input0, module.c_g_out,
-                                                                         module, curr_grad=grad)
-                    del module.o_input0, module.o_g_out, module.c_input0, module.c_g_out
-                module.backward_weight_hook = module.weight.register_hook(hook)
+            module.o_input0, module.o_g_out, module.c_input0, module.c_g_out = o_input0, tuple(t for t in o_g_out), c_input0, tuple(t for t in c_g_out)
+            if hasattr(module, 'backward_weight_hook'):
+                module.backward_weight_hook.remove()
+
+            def hook(grad):
+                module.weight.grad_alignments = self.align_func_conv(module.o_input0, module.o_g_out, module.c_input0, module.c_g_out,
+                                                                     module, curr_grad=grad)
+                del module.o_input0, module.o_g_out, module.c_input0, module.c_g_out
+            module.backward_weight_hook = module.weight.register_hook(hook)
 
             #ga = self.align_func_conv(o_input0, o_g_out, c_input0, c_g_out, module)
-            ga = None
+            ga = 'overwrite me'
         else:
             comp_X, comp_dE_dY = convUtils.get_weight_gradient_factors(
                 c_input0, c_g_out[0], module
