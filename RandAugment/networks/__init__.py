@@ -14,11 +14,12 @@ from RandAugment.networks.shakeshake.shake_resnext import ShakeResNeXt
 from RandAugment.adaptive_dropouter import AdaptiveDropouter
 
 
-def get_model(conf, optimizer_creator, num_class=10):
+def get_model(conf, optimizer_creator, num_class=10, writer=None):
     name = conf['type']
     if 'adaptive_dropouter' in conf:
         assert name in ('wresnet28_10',)
-        ad_creator = lambda w: AdaptiveDropouter(w, conf['adaptive_dropouter']['hidden_size'], optimizer_creator)
+        ad_conf = conf['adaptive_dropouter']
+        ad_creator = lambda w: AdaptiveDropouter(w, ad_conf['hidden_size'], optimizer_creator, cross_entropy_alpha=ad_conf['cross_entropy_alpha'], target_p=ad_conf['target_p'], summary_writer=writer)
     else:
         ad_creator = None
 

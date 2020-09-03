@@ -45,7 +45,7 @@ def run_epoch(model, loader, loss_fn, optimizer, desc_default='', epoch=0, write
         steps += 1
         if preprocessor:
             data = [torchvision.transforms.ToPILImage()(ti) for ti in data]
-            data = preprocessor(data,epoch - 1 + float(steps) / total_steps)
+            data = preprocessor(data,int((epoch - 1) * total_steps) + steps)
         data, label = data.cuda(), label.cuda()
 
         if optimizer:
@@ -74,8 +74,12 @@ def run_epoch(model, loader, loss_fn, optimizer, desc_default='', epoch=0, write
             if ga is not None and optimizer:
                 if hasattr(preprocessor, 'step'):
                     preprocessor.step(ga)
-                if hasattr(model, 'adaptive_dropouter') and hasattr(model.adaptive_dropouter, 'step'):
-                    model.adaptive_dropouter.step(ga)
+                if hasattr(model, 'module'):
+                    actual_model = model.module
+                else:
+                    actual_model = model
+                if hasattr(actual_model, 'adaptive_dropouter') and hasattr(actual_model.adaptive_dropouter, 'step'):
+                    actual_model.adaptive_dropouter.step(ga)
             if C.get()['optimizer'].get('clip', 5) > 0:
                 nn.utils.clip_grad_norm_(model.parameters(), C.get()['optimizer'].get('clip', 5))
             optimizer.step()
@@ -117,6 +121,13 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
     if not reporter:
         reporter = lambda **kwargs: 0
 
+    if not tag:
+        from RandAugment.metrics import SummaryWriterDummy as SummaryWriter
+        logger.warning('tag not provided, no tensorboard log.')
+    else:
+        from tensorboardX import SummaryWriter
+    writers = [SummaryWriter(log_dir='./logs/%s/%s' % (tag, x)) for x in ['train', 'valid', 'test']]
+
     max_epoch = C.get()['epoch']
     trainsampler, trainloader, validloader, testloader_, dataset_info = get_dataloaders(C.get()['dataset'], C.get()['batch'], dataroot, test_ratio, split_idx=cv_fold)
     def get_meta_optimizer_factory():
@@ -136,7 +147,7 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
         return get_meta_optimizer
 
     # create a model & an optimizer
-    model = get_model(C.get()['model'], get_meta_optimizer_factory(), num_class(C.get()['dataset']))
+    model = get_model(C.get()['model'], get_meta_optimizer_factory(), num_class(C.get()['dataset']), writer=writers[0])
 
     criterion = nn.CrossEntropyLoss()
     if C.get()['optimizer']['type'] == 'sgd':
@@ -166,12 +177,6 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
             after_scheduler=scheduler
         )
 
-    if not tag:
-        from RandAugment.metrics import SummaryWriterDummy as SummaryWriter
-        logger.warning('tag not provided, no tensorboard log.')
-    else:
-        from tensorboardX import SummaryWriter
-    writers = [SummaryWriter(log_dir='./logs/%s/%s' % (tag, x)) for x in ['train', 'valid', 'test']]
     if 'preprocessor' in C.get():
         preprocessor_flags = C.get()['preprocessor']
         preprocessor_type = C.get()['preprocessor']['type']
