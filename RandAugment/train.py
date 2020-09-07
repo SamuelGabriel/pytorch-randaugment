@@ -16,12 +16,12 @@ from backpack import backpack, extend, memory_cleanup
 from backpack.extensions import BatchL2Grad
 from extensions.dot_align import DotAlignment
 
-from RandAugment.common import get_logger, get_sum_along_batch
+from RandAugment.common import get_logger, get_sum_along_batch, replace_parameters
 from RandAugment.data import get_dataloaders
 from RandAugment.lr_scheduler import adjust_learning_rate_resnet
 from RandAugment.metrics import accuracy, Accumulator
 from RandAugment.networks import get_model, num_class
-from RandAugment.preprocessors import LearnedPreprocessorRandaugmentSpace, StandardCIFARPreprocessor
+from RandAugment.preprocessors import LearnedPreprocessorRandaugmentSpace, StandardCIFARPreprocessor, LearnedRandAugmentPreprocessor
 from warmup_scheduler import GradualWarmupScheduler
 
 from RandAugment.common import add_filehandler, recursive_backpack_memory_cleanup
@@ -41,48 +41,93 @@ def run_epoch(model, loader, loss_fn, optimizer, desc_default='', epoch=0, write
     total_steps = len(loader)
     steps = 0
     backpack_state = {}
+
+    def call_attr_on_meta_modules(fun_name, *args, **kwargs):
+        if hasattr(preprocessor, 'step'):
+            getattr(preprocessor, fun_name)(*args, **kwargs)
+        if hasattr(model, 'module'):
+            actual_model = model.module
+        else:
+            actual_model = model
+        if hasattr(actual_model, 'adaptive_dropouter') and hasattr(actual_model.adaptive_dropouter, 'step'):
+            getattr(actual_model.adaptive_dropouter, fun_name)(*args, **kwargs)
+
+    call_attr_on_meta_modules('reset_state')
     for data, label in loader:
         steps += 1
+
+
         if preprocessor:
             data = [torchvision.transforms.ToPILImage()(ti) for ti in data]
             data = preprocessor(data,int((epoch - 1) * total_steps) + steps)
         data, label = data.cuda(), label.cuda()
 
         if optimizer:
-            optimizer.zero_grad()
+            #optimizer.zero_grad()
+            for p in model.parameters(): p.grad = None
 
         preds = model(data)
         if 'test' in desc_default:
             recursive_backpack_memory_cleanup(model)
-        #print([p for p in model.parameters() if p.device != torch.device('cuda:0')])
-        #print([p for p in model.buffers() if p.device != torch.device('cuda:0')])
+        # print([p for p in model.parameters() if p.device != torch.device('cuda:0')])
+        # print([p for p in model.buffers() if p.device != torch.device('cuda:0')])
         loss = loss_fn(preds, label)
-
+        #print('mem usage before backward:', torch.cuda.memory_allocated() / 1000 // 1000, 'MB')
         if optimizer:
             if 'alignment_loss' in C.get():
                 alignment_loss_flags = C.get()['alignment_loss']
                 with backpack(DotAlignment(len(data), 0, backpack_state, 'remove_me' == alignment_loss_flags['summation'],
                                            'normalized' == alignment_loss_flags['summation'],
-                                           'cossim' == alignment_loss_flags['alignment_type'], align_with=alignment_loss_flags['align_with'])):
+                                           'cossim' == alignment_loss_flags['alignment_type'],
+                                           align_with=alignment_loss_flags['align_with'], use_slow_version=alignment_loss_flags.get('use_slow_version',False))):
                     loss.backward()
                 if '2' not in alignment_loss_flags['align_with'] or steps > 1:
                     ga = get_sum_along_batch(model, 'grad_alignments')
                 else:
                     ga = None
+            elif 'unrolled_loop_loss' in C.get():
+                gradients = torch.autograd.grad(loss,[p for n,p in model.named_parameters() if 'adaptive_dropouter' not in n],create_graph=True)
+                #if hasattr(model, 'module'):
+                #    actual_model = model.module
+                #else:
+                #    actual_model = model
+                #if hasattr(actual_model, 'adaptive_dropouter') and hasattr(actual_model.adaptive_dropouter, 'step'):
+                #    for p in actual_model.adaptive_dropouter.parameters(): p.grad = None
+                if steps == 1:
+                    ga = None
+                    last_grads = gradients
+                else:
+                    curr_grads = gradients
+                    ga = sum(c_g.flatten() @ l_g.flatten() for c_g,l_g in zip(curr_grads,last_grads) if c_g is not None or l_g is not None)
+                    # now we can use autograd.grad with ga towards the weights we want to optimize with alignment
+                    last_grads = curr_grads
+
+                # this part is to replace parameters in both model and parameter, s.t. we do not update tensors that are part of graph
+                new_parameters = []
+                old_parameters = []
+                for (n, p),g in zip(model.named_parameters(),gradients):
+                    if 'adaptive_dropouter' in n:
+                        continue
+                    old_parameters.append(p)
+                    new_p = torch.nn.Parameter(p.clone().detach(),requires_grad=True)
+                    new_p.grad = g.detach().clone() if g is not None else None
+                    new_parameters.append(new_p)
+                    names = n.split('.')
+                    sub_module = model
+                    for n in names[:-1]:
+                        sub_module = getattr(sub_module, n)
+                    sub_module.register_parameter(names[-1], new_p)
+                replace_parameters(optimizer,old_parameters,new_parameters)
             else:
                 loss.backward()
-            if ga is not None and optimizer:
-                if hasattr(preprocessor, 'step'):
-                    preprocessor.step(ga)
-                if hasattr(model, 'module'):
-                    actual_model = model.module
-                else:
-                    actual_model = model
-                if hasattr(actual_model, 'adaptive_dropouter') and hasattr(actual_model.adaptive_dropouter, 'step'):
-                    actual_model.adaptive_dropouter.step(ga)
+                ga = None
+
+            if ga is not None:
+                call_attr_on_meta_modules('step',ga)
             if C.get()['optimizer'].get('clip', 5) > 0:
                 nn.utils.clip_grad_norm_(model.parameters(), C.get()['optimizer'].get('clip', 5))
             optimizer.step()
+            del ga
 
         top1, top5 = accuracy(preds, label, (1, 5))
         metrics.add_dict({
@@ -131,7 +176,7 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
     max_epoch = C.get()['epoch']
     trainsampler, trainloader, validloader, testloader_, dataset_info = get_dataloaders(C.get()['dataset'], C.get()['batch'], dataroot, test_ratio, split_idx=cv_fold)
     def get_meta_optimizer_factory():
-        meta_flags = C.get()['meta_opt']
+        meta_flags = C.get().get('meta_opt',{})
         if 'meta_optimizer' in meta_flags:
             mo_flags = meta_flags['meta_optimizer']
             if mo_flags['type'] == 'adam':
@@ -147,12 +192,12 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
         return get_meta_optimizer
 
     # create a model & an optimizer
-    model = get_model(C.get()['model'], get_meta_optimizer_factory(), num_class(C.get()['dataset']), writer=writers[0])
+    model = get_model(C.get()['model'], get_meta_optimizer_factory, num_class(C.get()['dataset']), writer=writers[0])
 
     criterion = nn.CrossEntropyLoss()
     if C.get()['optimizer']['type'] == 'sgd':
         optimizer = optim.SGD(
-            model.parameters(),
+            model.parameters(), # zeroing is done using a loop so please do not add other parameters
             lr=C.get()['lr'],
             momentum=C.get()['optimizer'].get('momentum', 0.9),
             weight_decay=C.get()['optimizer']['decay'],
@@ -180,10 +225,10 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
     if 'preprocessor' in C.get():
         preprocessor_flags = C.get()['preprocessor']
         preprocessor_type = C.get()['preprocessor']['type']
-        if preprocessor_type == 'learned_randaugmentspace':
+        if preprocessor_type in ('learned_randaugmentspace','learned_random_randaugmentspace'):
             importance_sampling = False
             assert not preprocessor_flags.get('online_tests_on_model')
-            image_preprocessor = LearnedPreprocessorRandaugmentSpace(dataset_info,
+            image_preprocessor = (LearnedPreprocessorRandaugmentSpace if preprocessor_type == 'learned_randaugmentspace' else LearnedRandAugmentPreprocessor) (dataset_info,
                                                                      preprocessor_flags['hidden_dim'],
                                                                      get_meta_optimizer_factory(),
                                                                      preprocessor_flags['entropy_alpha'],
@@ -198,6 +243,7 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
                                                                      label_smoothing_rate=preprocessor_flags.get('label_smoothing_rate',0.),
                                                                      device=torch.device('cuda:0'),
                                                                      summary_writer=writers[0])
+
         elif preprocessor_type == 'standard_cifar':
             image_preprocessor = StandardCIFARPreprocessor(dataset_info, C.get().get('cutout', 0))
         else:

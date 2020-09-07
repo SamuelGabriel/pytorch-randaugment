@@ -6,7 +6,7 @@ aug: default
 
 preprocessor:
   type: learned_randaugmentspace
-  entropy_alpha: 0.
+  entropy_alpha: 1.
   hidden_dim: 100
   scale_entropy_alpha: .0
   online_tests_on_model: false
@@ -15,11 +15,11 @@ preprocessor:
   scale_embs_zero_init: true
   normalize_reward: true
   importance_sampling: false
-  label_smoothing_rate: .2
+  label_smoothing_rate: .0
 
 alignment_loss:
   summation: standard
-  align_with: '2'
+  align_with: '2-1'
   val_share: .0
   alignment_type: dot
 
@@ -30,7 +30,7 @@ meta_opt:
     beta1: .0
     beta2: .999
 batch: 128
-epoch: 300
+epoch: 200
 lr: 0.05
 lr_schedule:
   type: 'cosine'

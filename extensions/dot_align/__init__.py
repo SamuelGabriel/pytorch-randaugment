@@ -180,7 +180,7 @@ class DotAlignment(BackpropExtension):
         if val_bs:
             print("Oooh! Validation batch is not tested!")
 
-    def __init__(self,bs,val_bs,state,remove_me_summation,normalized_summation,cossim,align_with='1'):
+    def __init__(self,bs,val_bs,state,remove_me_summation,normalized_summation,cossim,align_with='1',use_slow_version=False):
         assert align_with in ('1','2','2-1')
         self.warn(val_bs)
         alignment_function = ComputeAlignment(bs,val_bs,remove_me_summation,normalized_summation,cossim,align_with=='2-1')
@@ -191,7 +191,7 @@ class DotAlignment(BackpropExtension):
             fail_mode="WARNING",
             module_exts={
                 Linear: linear.DotAlignLinear(alignment_function,alignment_function_vec,state,align_with_next='2' in align_with),
-                Conv2d: conv2d.DotAlignConv2d(alignment_function,alignment_function_vec,alignment_function_conv,state,align_with_next='2' in align_with),
+                Conv2d: conv2d.DotAlignConv2d(alignment_function,alignment_function_vec,None if use_slow_version else alignment_function_conv,state,align_with_next='2' in align_with),
                 #BatchNorm1d: batchnorm1d.DotAlignBatchNorm1d(alignment_function),
             },
         )

@@ -1,15 +1,18 @@
 model:
   type: shakeshake26_2x96d
 dataset: cifar10
-aug: fa_reduced_cifar10
 cutout: 16
-batch: 512
+batch: 128
 epoch: 1800
-lr: 0.01
+lr: 0.005
+aug: randaugment
+randaug:
+  N: 3
+  M: 9    # from appendix
 lr_schedule:
   type: 'cosine'
   warmup:
-    multiplier: 4
+    multiplier: 2
     epoch: 5
 optimizer:
   type: sgd

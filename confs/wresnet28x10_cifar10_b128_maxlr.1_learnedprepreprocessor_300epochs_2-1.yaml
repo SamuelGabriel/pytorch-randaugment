@@ -19,7 +19,7 @@ preprocessor:
 
 alignment_loss:
   summation: standard
-  align_with: '2'
+  align_with: '2-1'
   val_share: .0
   alignment_type: dot
 

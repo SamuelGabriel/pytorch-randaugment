@@ -5,8 +5,8 @@ cutout: 16
 aug: default
 
 preprocessor:
-  type: learned_randaugmentspace
-  entropy_alpha: 0.
+  type: learned_random_randaugmentspace
+  entropy_alpha: 0.01
   hidden_dim: 100
   scale_entropy_alpha: .0
   online_tests_on_model: false
@@ -15,18 +15,18 @@ preprocessor:
   scale_embs_zero_init: true
   normalize_reward: true
   importance_sampling: false
-  label_smoothing_rate: .2
+  label_smoothing_rate: .0
 
 alignment_loss:
   summation: standard
-  align_with: '2'
+  align_with: '2-1'
   val_share: .0
   alignment_type: dot
 
 meta_opt:
   meta_optimizer:
     type: adam
-    lr: .001
+    lr: .0001
     beta1: .0
     beta2: .999
 batch: 128

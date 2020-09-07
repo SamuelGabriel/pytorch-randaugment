@@ -32,6 +32,12 @@ def get_sum_along_batch(model, attribute):
             grad_list.append(ga)
     return torch.stack(grad_list).sum(0)
 
+def get_gradients(model):
+    grad_list = []
+    for param in model.parameters():
+        grad_list.append(param.grad)
+    return grad_list
+
 def recursive_backpack_memory_cleanup(module: torch.nn.Module):
     """Remove I/O stored by backpack during the forward pass.
 
@@ -41,3 +47,10 @@ def recursive_backpack_memory_cleanup(module: torch.nn.Module):
     memory_cleanup(module)
     for m in module.modules():
         memory_cleanup(m)
+
+def replace_parameters(optimizer, old_ps, new_ps):
+    assert len(optimizer.param_groups) == 1
+    for o_p, n_p in zip(old_ps,new_ps):
+        optimizer.state[n_p] = optimizer.state[o_p]
+        del optimizer.state[o_p]
+    optimizer.param_groups[0]['params'] = list(new_ps)

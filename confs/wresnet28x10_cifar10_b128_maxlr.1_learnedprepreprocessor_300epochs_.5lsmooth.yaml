@@ -15,7 +15,7 @@ preprocessor:
   scale_embs_zero_init: true
   normalize_reward: true
   importance_sampling: false
-  label_smoothing_rate: .2
+  label_smoothing_rate: .5
 
 alignment_loss:
   summation: standard

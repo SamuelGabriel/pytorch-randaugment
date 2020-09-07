@@ -206,6 +206,7 @@ class LearnedPreprocessorRandaugmentSpace(ImagePreprocessor):
         return rewards
 
     def step(self, rewards):
+        assert len(self.agumentation_sampler_copies) <= 2
         aug_sampler = self.agumentation_sampler_copies.pop(0)  # pops the oldest state first (queue-style)
         if self.t % 100 == 0 and self.summary_writer is not None and self.training:
             self.summary_writer.add_scalar(f'Alignment/AverageAlignment', rewards.mean(), self.t)
@@ -218,7 +219,7 @@ class LearnedPreprocessorRandaugmentSpace(ImagePreprocessor):
             weights = self.compute_weights(rewards).detach().to(self.device)
 
         aug_sampler.zero_grad()
-        loss = -aug_sampler.logps @ weights.detach() / float(len(weights))
+        loss = -aug_sampler.logps @ weights.detach()
         if self.entropy_alpha:
             neg_entropy = aug_sampler.p_op @ (
                         aug_sampler.log_p_op * (aug_sampler.p_op != 0.))  # here we could have logp = -inf and p = 0.
@@ -249,6 +250,10 @@ class LearnedPreprocessorRandaugmentSpace(ImagePreprocessor):
         self.optimizer.step()
         del aug_sampler
 
+    def reset_state(self):
+        del self.agumentation_sampler_copies
+        self.agumentation_sampler_copies = []
+
     def write_summary(self, aug_sampler, step):
         if step % 100 == 0 and self.summary_writer is not None and self.training:
             with torch.no_grad():
@@ -264,5 +269,172 @@ class LearnedPreprocessorRandaugmentSpace(ImagePreprocessor):
                 p_scale = torch.softmax(scale_logits, 1)
                 for aug_idx, scale_dist in enumerate(p_scale):
                     self.summary_writer.add_scalar(f'MaxScale/aug_{aug_idx}', torch.argmax(scale_dist), step)
+                for aug_idx, scale_dist in enumerate(p_scale):
+                    self.summary_writer.add_scalar(f'AvgScale/aug_{aug_idx}', scale_dist @ torch.arange(scale_dist.shape[-1],dtype=scale_dist.dtype,device=scale_dist.device), step)
                 for i, p_ in enumerate(p_scale.mean(0)):
                     self.summary_writer.add_scalar(f'PreprocessorWeightsScale/p_{i}', p_, step)
+
+class RandAugmentationSampler(nn.Module):
+    def __init__(self, hidden_dimension, num_transforms, num_scales, max_num_sequential_transforms, q_residual, q_zero_init, scale_embs_zero_init,
+                 label_smoothing_rate):
+        super().__init__()
+        self.op_embs = nn.Parameter(torch.normal(0., 1., (num_transforms, hidden_dimension), requires_grad=True))
+        self.num_transforms_embs = nn.Parameter(torch.normal(0., 1., (max_num_sequential_transforms+1, hidden_dimension), requires_grad=True))
+        if scale_embs_zero_init:
+            self.scale_embs = nn.Parameter(torch.zeros(num_scales, hidden_dimension, requires_grad=True))
+        else:
+            self.scale_embs = nn.Parameter(torch.normal(0., 1., (num_scales, hidden_dimension), requires_grad=True))
+        if q_zero_init:
+            self.q = nn.Parameter(torch.zeros(hidden_dimension, requires_grad=True))
+        else:
+            self.q = nn.Parameter(torch.normal(0., 1., hidden_dimension, requires_grad=True))
+        self.label_smoothing_rate = label_smoothing_rate
+        self.q_residual = q_residual
+
+    def add_grad_of_copy(self, copy):
+        # zero grad beforehand
+        for p, p_copy in zip(self.parameters(), copy.parameters()):
+            if p.grad is None:
+                p.grad = p_copy.grad
+            else:
+                p.grad += p_copy.grad
+
+    def compute_q(self, model=None):
+        return self.q
+
+    def forward(self, num_samples, model=None):
+        self.q = self.compute_q(model)
+        self.num_transforms_logits = self.num_transforms_embs @ self.q
+        self.p_num_transforms = torch.softmax(self.num_transforms_logits, 0)
+        self.log_p_num_transforms = torch.log_softmax(self.num_transforms_logits, 0)
+        sampled_num_transforms = torch.multinomial(self.p_num_transforms, num_samples, replacement=True)
+        augmentation_inds = torch.randint(len(self.op_embs),(num_samples,len(self.p_num_transforms)-1))
+        augmentation_mask = torch.arange(len(self.p_num_transforms)-1).unsqueeze(0).expand(num_samples,len(self.p_num_transforms)-1).to(sampled_num_transforms.device) >= sampled_num_transforms.unsqueeze(1)
+        augmentation_inds[augmentation_mask] = 0 # index of identity augmentation
+        hidden = self.op_embs[augmentation_inds]
+        if self.q_residual:
+            hidden += self.q
+        scale_logits = hidden @ self.scale_embs.t()
+        p_scale = torch.softmax(scale_logits, 2)
+        log_p_scale = torch.log_softmax(scale_logits, 2)
+        sampled_scales = torch.multinomial(p_scale.view(-1,p_scale.shape[2]), 1, replacement=True).view(p_scale.shape[:2])
+        #log_ps_of_sampled_scales = torch.gather(log_p_scale,1,sampled_scales)
+        flat_log_p_scale = log_p_scale.view(-1,log_p_scale.shape[2])
+        log_ps_of_sampled_scales = flat_log_p_scale[torch.arange(len(flat_log_p_scale)),sampled_scales.flatten()].view_as(sampled_scales)
+        log_ps_of_sampled_scales[augmentation_mask] = 0.
+        self.logps = self.log_p_num_transforms[sampled_num_transforms] + log_ps_of_sampled_scales.sum(1)
+        #if self.label_smoothing_rate:
+        #    self.logps = (self.log_p_op.mean() * len(sampled_op_idxs) + log_p_scale.mean(1).sum(
+        #        0)) * self.label_smoothing_rate \
+        #                 + self.logps * (1. - self.label_smoothing_rate)
+        return augmentation_inds.cpu(), sampled_scales.cpu()
+
+
+class LearnedRandAugmentPreprocessor(ImagePreprocessor):
+    def __init__(self, dataset_info, hidden_dimension, optimizer_creator, entropy_alpha, scale_entropy_alpha=0.,
+                 importance_sampling=False, cutout=0, normalize_reward=True, model_for_online_tests=None,
+                 D_out=10, q_zero_init=True, q_residual=False, scale_embs_zero_init=False, label_smoothing_rate=0., max_num_sequential_transforms=5,
+                 **kwargs):
+        super().__init__(**kwargs)
+        print('using learned preprocessor')
+
+        img_dims = dataset_info['img_dims']
+        self.num_transforms = google_augmentations.num_augmentations()
+        self.num_scales = google_augmentations.PARAMETER_MAX + 1
+        self.standard_cifar_preprocessor = StandardCIFARPreprocessor(dataset_info, cutout=cutout,
+                                                                     device=self.device)
+        self.model = model_for_online_tests
+
+        self.augmentation_sampler = RandAugmentationSampler(hidden_dimension, self.num_transforms, self.num_scales, max_num_sequential_transforms,
+                                                        q_residual, q_zero_init, scale_embs_zero_init,
+                                                        label_smoothing_rate).to(self.device)
+        self.agumentation_sampler_copies = []
+
+        self.normalize_reward = normalize_reward
+        self.optimizer = optimizer_creator(self.augmentation_sampler.parameters())
+        self.entropy_alpha = entropy_alpha
+        self.scale_entropy_alpha = scale_entropy_alpha
+        self.importance_sampling = importance_sampling
+
+    def forward(self, imgs, step):
+        self.t = step
+        if self.training:
+            aug_sampler = deepcopy(self.augmentation_sampler)
+            self.agumentation_sampler_copies.append(aug_sampler)
+            sampled_op_idxs, sampled_scales = aug_sampler(len(imgs), self.model)
+            activated_transforms_for_batch = [[(i,s) for i,s in zip(i_s,s_s)] for i_s,s_s in zip(sampled_op_idxs,sampled_scales)]
+            self.write_summary(aug_sampler, step)
+        else:
+            activated_transforms_for_batch = [[(0, 1.)] for i in imgs]  # do not apply any augmentation when evaluating
+        t_imgs = []
+        for i, (img, augs) in enumerate(zip(imgs, activated_transforms_for_batch)):
+            for op, scale in augs:
+                img = google_augmentations.apply_augmentation(op, scale, img)
+            t_imgs.append(img)
+        if self.importance_sampling and self.training:
+            w = 1. / (self.num_transforms * self.num_scales * torch.exp(aug_sampler.logps.detach()))
+            return self.standard_cifar_preprocessor(t_imgs, step), w * (len(w) / torch.sum(w))
+        return self.standard_cifar_preprocessor(t_imgs, step)
+
+    def compute_weights(self, rewards):
+        if self.normalize_reward:
+            rewards = (rewards - torch.mean(rewards)) / torch.std(rewards)
+        return rewards
+
+    def step(self, rewards):
+        assert len(self.agumentation_sampler_copies) <= 2
+        aug_sampler = self.agumentation_sampler_copies.pop(0)  # pops the oldest state first (queue-style)
+        if self.t % 100 == 0 and self.summary_writer is not None and self.training:
+            self.summary_writer.add_scalar(f'Alignment/AverageAlignment', rewards.mean(), self.t)
+            self.summary_writer.add_scalar(f'Alignment/MaxAlignment', rewards.max(), self.t)
+            self.summary_writer.add_scalar(f'Alignment/MinAlignment', rewards.min(), self.t)
+
+        with torch.no_grad():
+            if self.importance_sampling:
+                rewards *= 1. / ((self.num_transforms * self.num_scales) ** 2 * torch.exp(2 * self.logps))
+            weights = self.compute_weights(rewards).detach().to(self.device)
+
+        aug_sampler.zero_grad()
+        loss = -aug_sampler.logps @ weights.detach()
+        if self.entropy_alpha:
+            neg_entropy = aug_sampler.p_num_transforms @ (
+                        aug_sampler.log_p_num_transforms * (aug_sampler.p_num_transforms != 0.))  # here we could have logp = -inf and p = 0.
+            loss += self.entropy_alpha * neg_entropy
+        if self.scale_entropy_alpha:
+            hidden = aug_sampler.op_embs
+            if aug_sampler.q_residual:
+                hidden = aug_sampler.op_embs + aug_sampler.q
+            scale_logits = hidden @ aug_sampler.scale_embs.t()
+            log_p_scale = torch.log_softmax(scale_logits, 1)
+            p_scale = torch.softmax(scale_logits, 1)
+            avg_neg_entropy = torch.einsum('bh,bh->b', p_scale, (
+                        log_p_scale * (p_scale != 0.))).mean()  # here we could have logp = -inf and p = 0.
+            loss += self.scale_entropy_alpha * avg_neg_entropy
+
+        loss.backward()
+        torch.nn.utils.clip_grad_value_(aug_sampler.parameters(), 5.)
+        self.augmentation_sampler.zero_grad()
+        self.augmentation_sampler.add_grad_of_copy(aug_sampler)
+        self.optimizer.step()
+        del aug_sampler
+
+    def reset_state(self):
+        del self.agumentation_sampler_copies
+        self.agumentation_sampler_copies = []
+
+    def write_summary(self, aug_sampler, step):
+        if step % 10 == 0 and self.summary_writer is not None and self.training:
+            with torch.no_grad():
+                for i,p in enumerate(aug_sampler.p_num_transforms):
+                    self.summary_writer.add_scalar(f'NumAugs/{i}', p, step)
+
+                hidden = aug_sampler.op_embs
+                if aug_sampler.q_residual:
+                    hidden += aug_sampler.compute_q()
+                scale_logits = hidden @ aug_sampler.scale_embs.t()
+                p_scale = torch.softmax(scale_logits, 1)
+                for aug_idx, scale_dist in enumerate(p_scale):
+                    self.summary_writer.add_scalar(f'AvgScale/aug_{aug_idx}', scale_dist @ torch.arange(scale_dist.shape[-1],dtype=scale_dist.dtype,device=scale_dist.device), step)
+                for aug_idx, scale_dist in enumerate(p_scale):
+                    self.summary_writer.add_scalar(f'MaxScale/aug_{aug_idx}', torch.argmax(scale_dist), step)
+

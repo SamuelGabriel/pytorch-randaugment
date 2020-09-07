@@ -11,15 +11,23 @@ from RandAugment.networks.shakeshake.shake_resnet import ShakeResNet
 from RandAugment.networks.wideresnet import WideResNet
 from RandAugment.networks.shakeshake.shake_resnext import ShakeResNeXt
 
-from RandAugment.adaptive_dropouter import AdaptiveDropouter
+from RandAugment.meta_state_adaption import AdaptiveDropouter, Modulator
 
 
-def get_model(conf, optimizer_creator, num_class=10, writer=None):
+def get_model(conf, optimizer_creator_factory, num_class=10, writer=None):
     name = conf['type']
+    assert not ('adaptive_dropouter' in conf and 'adaptive_modulator' in conf)
     if 'adaptive_dropouter' in conf:
         assert name in ('wresnet28_10',)
         ad_conf = conf['adaptive_dropouter']
-        ad_creator = lambda w: AdaptiveDropouter(w, ad_conf['hidden_size'], optimizer_creator, cross_entropy_alpha=ad_conf['cross_entropy_alpha'], target_p=ad_conf['target_p'], summary_writer=writer)
+        if ad_conf['simple_dropout']:
+            ad_creator = lambda w: torch.nn.Dropout(p=1.-ad_conf['target_p'])
+        else:
+            ad_creator = lambda w: AdaptiveDropouter(w, ad_conf['hidden_size'], optimizer_creator_factory(), cross_entropy_alpha=ad_conf['cross_entropy_alpha'], target_p=ad_conf['target_p'], out_bias=ad_conf['out_bias'], relu=ad_conf['relu'], inference_dropout=ad_conf.get('inference_dropout', False), summary_writer=writer)
+    elif 'adaptive_modulator' in conf:
+        assert name in ('wresnet28_10',)
+        ad_conf = conf['adaptive_modulator']
+        ad_creator = lambda w: Modulator(w, ad_conf['hidden_size'], optimizer_creator_factory(), out_bias=ad_conf['out_bias'], relu=ad_conf['relu'], summary_writer=writer)
     else:
         ad_creator = None
 
