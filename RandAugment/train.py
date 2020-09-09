@@ -63,8 +63,8 @@ def run_epoch(model, loader, loss_fn, optimizer, desc_default='', epoch=0, write
         data, label = data.cuda(), label.cuda()
 
         if optimizer:
-            #optimizer.zero_grad()
-            for p in model.parameters(): p.grad = None
+            optimizer.zero_grad()
+            #for p in model.parameters(): p.grad = None
 
         preds = model(data)
         if 'test' in desc_default:
@@ -72,11 +72,11 @@ def run_epoch(model, loader, loss_fn, optimizer, desc_default='', epoch=0, write
         # print([p for p in model.parameters() if p.device != torch.device('cuda:0')])
         # print([p for p in model.buffers() if p.device != torch.device('cuda:0')])
         loss = loss_fn(preds, label)
-        #print('mem usage before backward:', torch.cuda.memory_allocated() / 1000 // 1000, 'MB')
+        val_batch = C.get().get('val_batch',0)
         if optimizer:
             if 'alignment_loss' in C.get():
                 alignment_loss_flags = C.get()['alignment_loss']
-                with backpack(DotAlignment(len(data), 0, backpack_state, 'remove_me' == alignment_loss_flags['summation'],
+                with backpack(DotAlignment(len(data), val_batch, backpack_state, 'remove_me' == alignment_loss_flags['summation'],
                                            'normalized' == alignment_loss_flags['summation'],
                                            'cossim' == alignment_loss_flags['alignment_type'],
                                            align_with=alignment_loss_flags['align_with'], use_slow_version=alignment_loss_flags.get('use_slow_version',False))):
@@ -174,7 +174,8 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
     writers = [SummaryWriter(log_dir='./logs/%s/%s' % (tag, x)) for x in ['train', 'valid', 'test']]
 
     max_epoch = C.get()['epoch']
-    trainsampler, trainloader, validloader, testloader_, dataset_info = get_dataloaders(C.get()['dataset'], C.get()['batch'], dataroot, test_ratio, split_idx=cv_fold)
+    val_bs = C.get().get('val_batch',0)
+    trainsampler, trainloader, validloader, testloader_, dataset_info = get_dataloaders(C.get()['dataset'], C.get()['batch']+val_bs, dataroot, test_ratio, split_idx=cv_fold)
     def get_meta_optimizer_factory():
         meta_flags = C.get().get('meta_opt',{})
         if 'meta_optimizer' in meta_flags:
@@ -192,7 +193,7 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
         return get_meta_optimizer
 
     # create a model & an optimizer
-    model = get_model(C.get()['model'], get_meta_optimizer_factory, num_class(C.get()['dataset']), writer=writers[0])
+    model = get_model(C.get()['model'], C.get()['batch'], val_bs, get_meta_optimizer_factory, num_class(C.get()['dataset']), writer=writers[0])
 
     criterion = nn.CrossEntropyLoss()
     if C.get()['optimizer']['type'] == 'sgd':
@@ -284,9 +285,10 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
         model.eval()
         if image_preprocessor: image_preprocessor.eval()
         rs = dict()
-        rs['train'] = run_epoch(model, trainloader, criterion, None, desc_default='train', epoch=0, writer=writers[0])
-        rs['valid'] = run_epoch(model, validloader, criterion, None, desc_default='valid', epoch=0, writer=writers[1])
-        rs['test'] = run_epoch(model, testloader_, criterion, None, desc_default='*test', epoch=0, writer=writers[2])
+        with torch.no_grad():
+            rs['train'] = run_epoch(model, trainloader, criterion, None, desc_default='train', epoch=0, writer=writers[0])
+            rs['valid'] = run_epoch(model, validloader, criterion, None, desc_default='valid', epoch=0, writer=writers[1])
+            rs['test'] = run_epoch(model, testloader_, criterion, None, desc_default='*test', epoch=0, writer=writers[2])
         for key, setname in itertools.product(['loss', 'top1', 'top5'], ['train', 'valid', 'test']):
             if setname not in rs:
                 continue
@@ -308,8 +310,9 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
             raise Exception('train loss is NaN.')
 
         if epoch % 5 == 0 or epoch == max_epoch:
-            rs['valid'] = run_epoch(model, validloader, criterion, None, desc_default='valid', epoch=epoch, writer=writers[1], verbose=True, preprocessor=image_preprocessor)
-            rs['test'] = run_epoch(model, testloader_, criterion, None, desc_default='*test', epoch=epoch, writer=writers[2], verbose=True, preprocessor=image_preprocessor)
+            with torch.no_grad():
+                rs['valid'] = run_epoch(model, validloader, criterion, None, desc_default='valid', epoch=epoch, writer=writers[1], verbose=True, preprocessor=image_preprocessor)
+                rs['test'] = run_epoch(model, testloader_, criterion, None, desc_default='*test', epoch=epoch, writer=writers[2], verbose=True, preprocessor=image_preprocessor)
 
             if metric == 'last' or rs[metric]['top1'] > best_top1:
                 if metric != 'last':

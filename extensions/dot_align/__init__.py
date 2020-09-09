@@ -73,10 +73,10 @@ class ComputeAlignmentVec():
         if self.val_bs:
             comparison_X = comparison_X[self.bs-self.val_bs:]
             comparison_dE_dY = comparison_dE_dY[self.bs-self.val_bs:]
-            X = X[:self.bs-self.val_bs]
-            dE_dY = dE_dY[:self.bs-self.val_bs]
             comparison_this_X = X[self.bs-self.val_bs:]
             comparison_this_dE_dY = dE_dY[self.bs-self.val_bs:]
+            X = X[:self.bs-self.val_bs]
+            dE_dY = dE_dY[:self.bs-self.val_bs]
         else:
             comparison_this_X = X
             comparison_this_dE_dY = dE_dY
@@ -129,10 +129,10 @@ class ComputeAlignmentConv():
         if self.val_bs:
             comparison_X = comparison_X[self.bs - self.val_bs:]
             comparison_dE_dY = comparison_dE_dY[self.bs - self.val_bs:]
-            X = X[:self.bs - self.val_bs]
-            dE_dY = dE_dY[:self.bs - self.val_bs]
             comparison_this_X = X[self.bs - self.val_bs:]
             comparison_this_dE_dY = dE_dY[self.bs - self.val_bs:]
+            dE_dY = dE_dY[:self.bs - self.val_bs]
+            X = X[:self.bs - self.val_bs]
         else:
             comparison_this_X = X
             comparison_this_dE_dY = dE_dY
@@ -143,7 +143,7 @@ class ComputeAlignmentConv():
         #comparison_grad = torch.nn.grad.conv2d_weight(comparison_X,module.weight.shape,comparison_dE_dY)
         def get_grad(X,dE_dY):
             with torch.enable_grad():
-                return torch.autograd.grad(conv(X, module.weight), module.weight, dE_dY)[0]
+                return torch.autograd.grad(conv(X.detach(), module.weight), module.weight, dE_dY.detach())[0] # maybe need to retain_graph
         if curr_grad is not None and not self.val_bs:
             comparison_grad = curr_grad
         else:

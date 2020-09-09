@@ -35,13 +35,15 @@ class Sampler(nn.Module):
                 p.grad += p_copy.grad
 
 class AdaptiveDropouter(nn.Module):
-    def __init__(self, num_dropouts, hidden_dimension, optimizer_creator, cross_entropy_alpha=None, target_p=None, out_bias=False, relu=True, inference_dropout=False, summary_writer=None):
+    def __init__(self, num_dropouts, hidden_dimension, optimizer_creator, train_bs, val_bs, cross_entropy_alpha=None, target_p=None, out_bias=False, relu=True, inference_dropout=False, summary_writer=None):
         super().__init__()
         self.target_p = target_p
         self.cross_entropy_alpha = cross_entropy_alpha
         self.normalize_reward = True
         self.inference_dropout = inference_dropout
         self.summary_writer = summary_writer
+        self.train_bs = train_bs
+        self.val_bs = val_bs
 
         self.sampler = Sampler(num_dropouts,hidden_dimension,out_bias=out_bias,relu=relu)
         self.sampler_copies = []
@@ -52,19 +54,21 @@ class AdaptiveDropouter(nn.Module):
     def forward(self, orig_hiddens):
         # hiddens shall have size None x num_dropouts
         hiddens = orig_hiddens.detach()
+        keep_mask = torch.ones_like(hiddens, dtype=torch.bool)
         if self.training:
             self.t += 1
+            assert len(hiddens) == self.val_bs + self.train_bs
             sampler = deepcopy(self.sampler)
             self.sampler_copies.append(sampler)
 
-            keep_mask = sampler(hiddens)
+            keep_mask[:self.train_bs] = sampler(hiddens[:self.train_bs])
 
             self.write_summary(sampler, keep_mask, self.t)
         elif self.inference_dropout:
-            sampler = deepcopy(self.sampler)
-            keep_mask = sampler(hiddens)
-        else:
-            keep_mask = torch.ones_like(hiddens,dtype=torch.bool)
+            assert not torch.is_grad_enabled()
+            assert self.val_bs == 0
+            keep_mask = self.sampler(hiddens)
+
         return keep_mask.detach()*orig_hiddens
 
     def compute_weights(self, rewards):
@@ -85,10 +89,10 @@ class AdaptiveDropouter(nn.Module):
             weights = self.compute_weights(rewards).detach()
 
         sampler.zero_grad()
-        loss = - weights.detach() @ sampler.logps
+        loss = - weights.detach() @ sampler.logps / float(len(weights))
         if self.cross_entropy_alpha is not None and self.target_p is not None:
             print('apply cross entropy loss')
-            loss -= self.cross_entropy_alpha * (self.target_p * sampler.true_logps + (1.-self.target_p) * sampler.false_logps).sum()
+            loss -= self.cross_entropy_alpha * (self.target_p * sampler.true_logps + (1.-self.target_p) * sampler.false_logps).sum() / float(len(weights))
 
 
         loss.backward()

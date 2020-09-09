@@ -219,7 +219,7 @@ class LearnedPreprocessorRandaugmentSpace(ImagePreprocessor):
             weights = self.compute_weights(rewards).detach().to(self.device)
 
         aug_sampler.zero_grad()
-        loss = -aug_sampler.logps @ weights.detach()
+        loss = -aug_sampler.logps @ weights.detach() / float(len(weights))
         if self.entropy_alpha:
             neg_entropy = aug_sampler.p_op @ (
                         aug_sampler.log_p_op * (aug_sampler.p_op != 0.))  # here we could have logp = -inf and p = 0.
@@ -395,7 +395,7 @@ class LearnedRandAugmentPreprocessor(ImagePreprocessor):
             weights = self.compute_weights(rewards).detach().to(self.device)
 
         aug_sampler.zero_grad()
-        loss = -aug_sampler.logps @ weights.detach()
+        loss = -aug_sampler.logps @ weights.detach() / float(len(weights))
         if self.entropy_alpha:
             neg_entropy = aug_sampler.p_num_transforms @ (
                         aug_sampler.log_p_num_transforms * (aug_sampler.p_num_transforms != 0.))  # here we could have logp = -inf and p = 0.
