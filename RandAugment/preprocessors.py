@@ -155,7 +155,7 @@ class AugmentationSampler(nn.Module):
 
 
 class LearnedPreprocessorRandaugmentSpace(ImagePreprocessor):
-    def __init__(self, dataset_info, hidden_dimension, optimizer_creator, entropy_alpha, scale_entropy_alpha=0.,
+    def __init__(self, dataset_info, hidden_dimension, optimizer_creator, bs, val_bs, entropy_alpha, scale_entropy_alpha=0.,
                  importance_sampling=False, cutout=0, normalize_reward=True, model_for_online_tests=None,
                  D_out=10, q_zero_init=True, q_residual=False, scale_embs_zero_init=False, label_smoothing_rate=0.,
                  **kwargs):
@@ -180,14 +180,16 @@ class LearnedPreprocessorRandaugmentSpace(ImagePreprocessor):
         self.entropy_alpha = entropy_alpha
         self.scale_entropy_alpha = scale_entropy_alpha
         self.importance_sampling = importance_sampling
+        self.bs = bs
+        self.val_bs = val_bs
 
     def forward(self, imgs, step):
         self.t = step
         if self.training:
             aug_sampler = deepcopy(self.augmentation_sampler)
             self.agumentation_sampler_copies.append(aug_sampler)
-            sampled_op_idxs, sampled_scales = aug_sampler(len(imgs), self.model)
-            activated_transforms_for_batch = list(zip(sampled_op_idxs, sampled_scales))
+            sampled_op_idxs, sampled_scales = aug_sampler(self.bs, self.model)
+            activated_transforms_for_batch = list(zip(sampled_op_idxs, sampled_scales)) + [(0, 1.) for _ in range(self.val_bs)]
             self.write_summary(aug_sampler, step)
         else:
             activated_transforms_for_batch = [(0, 1.) for i in imgs]  # do not apply any augmentation when evaluating
@@ -331,7 +333,7 @@ class RandAugmentationSampler(nn.Module):
 
 
 class LearnedRandAugmentPreprocessor(ImagePreprocessor):
-    def __init__(self, dataset_info, hidden_dimension, optimizer_creator, entropy_alpha, scale_entropy_alpha=0.,
+    def __init__(self, dataset_info, hidden_dimension, optimizer_creator, bs, val_bs, entropy_alpha, scale_entropy_alpha=0.,
                  importance_sampling=False, cutout=0, normalize_reward=True, model_for_online_tests=None,
                  D_out=10, q_zero_init=True, q_residual=False, scale_embs_zero_init=False, label_smoothing_rate=0., max_num_sequential_transforms=5,
                  **kwargs):
@@ -349,6 +351,8 @@ class LearnedRandAugmentPreprocessor(ImagePreprocessor):
                                                         q_residual, q_zero_init, scale_embs_zero_init,
                                                         label_smoothing_rate).to(self.device)
         self.agumentation_sampler_copies = []
+        self.bs = bs
+        self.val_bs = val_bs
 
         self.normalize_reward = normalize_reward
         self.optimizer = optimizer_creator(self.augmentation_sampler.parameters())
@@ -361,8 +365,8 @@ class LearnedRandAugmentPreprocessor(ImagePreprocessor):
         if self.training:
             aug_sampler = deepcopy(self.augmentation_sampler)
             self.agumentation_sampler_copies.append(aug_sampler)
-            sampled_op_idxs, sampled_scales = aug_sampler(len(imgs), self.model)
-            activated_transforms_for_batch = [[(i,s) for i,s in zip(i_s,s_s)] for i_s,s_s in zip(sampled_op_idxs,sampled_scales)]
+            sampled_op_idxs, sampled_scales = aug_sampler(self.bs, self.model)
+            activated_transforms_for_batch = [[(i,s) for i,s in zip(i_s,s_s)] for i_s,s_s in zip(sampled_op_idxs,sampled_scales)] + [[(0,1.)] for _ in range(self.val_bs)]
             self.write_summary(aug_sampler, step)
         else:
             activated_transforms_for_batch = [[(0, 1.)] for i in imgs]  # do not apply any augmentation when evaluating

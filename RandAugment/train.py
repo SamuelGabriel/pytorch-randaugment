@@ -33,8 +33,10 @@ logger.setLevel(logging.INFO)
 def run_epoch(model, loader, loss_fn, optimizer, desc_default='', epoch=0, writer=None, verbose=1, scheduler=None, preprocessor=None):
     tqdm_disable = bool(os.environ.get('TASK_NAME', ''))    # KakaoBrain Environment
     if verbose:
-        loader = tqdm(loader, disable=tqdm_disable)
-        loader.set_description('[%s %04d/%04d]' % (desc_default, epoch, C.get()['epoch']))
+        logging_loader = tqdm(loader, disable=tqdm_disable)
+        logging_loader.set_description('[%s %04d/%04d]' % (desc_default, epoch, C.get()['epoch']))
+    else:
+        logging_loader = loader
 
     metrics = Accumulator()
     cnt = 0
@@ -45,6 +47,8 @@ def run_epoch(model, loader, loss_fn, optimizer, desc_default='', epoch=0, write
     def call_attr_on_meta_modules(fun_name, *args, **kwargs):
         if hasattr(preprocessor, 'step'):
             getattr(preprocessor, fun_name)(*args, **kwargs)
+        if hasattr(loader, 'step'):
+            getattr(loader, fun_name)(*args, **kwargs)
         if hasattr(model, 'module'):
             actual_model = model.module
         else:
@@ -53,7 +57,7 @@ def run_epoch(model, loader, loss_fn, optimizer, desc_default='', epoch=0, write
             getattr(actual_model.adaptive_dropouter, fun_name)(*args, **kwargs)
 
     call_attr_on_meta_modules('reset_state')
-    for data, label in loader:
+    for data, label in logging_loader: # logging loader might be a loader or a loader wrapped into tqdm
         steps += 1
 
 
@@ -72,6 +76,7 @@ def run_epoch(model, loader, loss_fn, optimizer, desc_default='', epoch=0, write
         # print([p for p in model.parameters() if p.device != torch.device('cuda:0')])
         # print([p for p in model.buffers() if p.device != torch.device('cuda:0')])
         loss = loss_fn(preds, label)
+        #print('mem usage before backward', torch.cuda.memory_allocated()/1000//1000, "MB")
         val_batch = C.get().get('val_batch',0)
         if optimizer:
             if 'alignment_loss' in C.get():
@@ -140,7 +145,7 @@ def run_epoch(model, loader, loss_fn, optimizer, desc_default='', epoch=0, write
             postfix = metrics / cnt
             if optimizer:
                 postfix['lr'] = optimizer.param_groups[0]['lr']
-            loader.set_postfix(postfix)
+            logging_loader.set_postfix(postfix)
 
         if scheduler is not None:
             scheduler.step(epoch - 1 + float(steps) / total_steps)
@@ -173,9 +178,6 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
         from tensorboardX import SummaryWriter
     writers = [SummaryWriter(log_dir='./logs/%s/%s' % (tag, x)) for x in ['train', 'valid', 'test']]
 
-    max_epoch = C.get()['epoch']
-    val_bs = C.get().get('val_batch',0)
-    trainsampler, trainloader, validloader, testloader_, dataset_info = get_dataloaders(C.get()['dataset'], C.get()['batch']+val_bs, dataroot, test_ratio, split_idx=cv_fold)
     def get_meta_optimizer_factory():
         meta_flags = C.get().get('meta_opt',{})
         if 'meta_optimizer' in meta_flags:
@@ -191,6 +193,9 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
         else:
             raise ValueError()
         return get_meta_optimizer
+    max_epoch = C.get()['epoch']
+    val_bs = C.get().get('val_batch',0)
+    trainsampler, trainloader, validloader, testloader_, dataset_info = get_dataloaders(C.get()['dataset'], C.get()['batch']+val_bs, dataroot, test_ratio, split_idx=cv_fold, get_meta_optimizer_factory=get_meta_optimizer_factory, summary_writer=writers[0])
 
     # create a model & an optimizer
     model = get_model(C.get()['model'], C.get()['batch'], val_bs, get_meta_optimizer_factory, num_class(C.get()['dataset']), writer=writers[0])
@@ -232,6 +237,7 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
             image_preprocessor = (LearnedPreprocessorRandaugmentSpace if preprocessor_type == 'learned_randaugmentspace' else LearnedRandAugmentPreprocessor) (dataset_info,
                                                                      preprocessor_flags['hidden_dim'],
                                                                      get_meta_optimizer_factory(),
+                                                                     C.get()['batch'],val_bs,
                                                                      preprocessor_flags['entropy_alpha'],
                                                                      scale_entropy_alpha=preprocessor_flags['scale_entropy_alpha'],
                                                                      cutout=C.get().get('cutout', 0),

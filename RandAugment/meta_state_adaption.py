@@ -91,7 +91,6 @@ class AdaptiveDropouter(nn.Module):
         sampler.zero_grad()
         loss = - weights.detach() @ sampler.logps / float(len(weights))
         if self.cross_entropy_alpha is not None and self.target_p is not None:
-            print('apply cross entropy loss')
             loss -= self.cross_entropy_alpha * (self.target_p * sampler.true_logps + (1.-self.target_p) * sampler.false_logps).sum() / float(len(weights))
 
 
