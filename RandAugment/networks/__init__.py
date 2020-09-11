@@ -23,7 +23,7 @@ def get_model(conf, bs, val_bs, optimizer_creator_factory, num_class=10, writer=
         if ad_conf['simple_dropout']:
             ad_creator = lambda w: torch.nn.Dropout(p=1.-ad_conf['target_p'])
         else:
-            ad_creator = lambda w: AdaptiveDropouter(w, ad_conf['hidden_size'], optimizer_creator_factory(), bs, val_bs, cross_entropy_alpha=ad_conf['cross_entropy_alpha'], target_p=ad_conf['target_p'], out_bias=ad_conf['out_bias'], relu=ad_conf['relu'], inference_dropout=ad_conf.get('inference_dropout', False), summary_writer=writer)
+            ad_creator = lambda w: AdaptiveDropouter(w, ad_conf['hidden_size'], optimizer_creator_factory(), bs, val_bs, cross_entropy_alpha=ad_conf['cross_entropy_alpha'], target_p=ad_conf['target_p'], out_bias=ad_conf['out_bias'], relu=ad_conf['relu'], inference_dropout=ad_conf.get('inference_dropout', False), scale_by_p=ad_conf.get('scale_by_p', False), summary_writer=writer)
     elif 'adaptive_modulator' in conf:
         assert name in ('wresnet28_10',)
         ad_conf = conf['adaptive_modulator']

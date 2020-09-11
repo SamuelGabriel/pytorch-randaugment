@@ -35,11 +35,12 @@ class Sampler(nn.Module):
                 p.grad += p_copy.grad
 
 class AdaptiveDropouter(nn.Module):
-    def __init__(self, num_dropouts, hidden_dimension, optimizer_creator, train_bs, val_bs, cross_entropy_alpha=None, target_p=None, out_bias=False, relu=True, inference_dropout=False, summary_writer=None):
+    def __init__(self, num_dropouts, hidden_dimension, optimizer_creator, train_bs, val_bs, cross_entropy_alpha=None, target_p=None, out_bias=False, relu=True, inference_dropout=False, scale_by_p=False, summary_writer=None):
         super().__init__()
         self.target_p = target_p
         self.cross_entropy_alpha = cross_entropy_alpha
         self.normalize_reward = True
+        self.scale_by_p = scale_by_p
         self.inference_dropout = inference_dropout
         self.summary_writer = summary_writer
         self.train_bs = train_bs
@@ -69,7 +70,11 @@ class AdaptiveDropouter(nn.Module):
             assert self.val_bs == 0
             keep_mask = self.sampler(hiddens)
 
-        return keep_mask.detach()*orig_hiddens
+        r = keep_mask.detach()*orig_hiddens
+        if self.scale_by_p:
+            r = r/keep_mask.float().mean()
+
+        return r
 
     def compute_weights(self, rewards):
         if self.normalize_reward:
