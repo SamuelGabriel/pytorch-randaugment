@@ -371,6 +371,7 @@ class LearnedRandAugmentPreprocessor(ImagePreprocessor):
         else:
             activated_transforms_for_batch = [[(0, 1.)] for i in imgs]  # do not apply any augmentation when evaluating
         t_imgs = []
+        google_augmentations.blend_images = imgs
         for i, (img, augs) in enumerate(zip(imgs, activated_transforms_for_batch)):
             for op, scale in augs:
                 img = google_augmentations.apply_augmentation(op, scale, img)

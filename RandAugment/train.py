@@ -23,6 +23,7 @@ from RandAugment.metrics import accuracy, Accumulator
 from RandAugment.networks import get_model, num_class
 from RandAugment.preprocessors import LearnedPreprocessorRandaugmentSpace, StandardCIFARPreprocessor, LearnedRandAugmentPreprocessor
 from warmup_scheduler import GradualWarmupScheduler
+from RandAugment import google_augmentations
 
 from RandAugment.common import add_filehandler, recursive_backpack_memory_cleanup
 
@@ -193,6 +194,7 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
         else:
             raise ValueError()
         return get_meta_optimizer
+    google_augmentations.set_search_space(C.get().get('augmentation_search_space','standard'))
     max_epoch = C.get()['epoch']
     val_bs = C.get().get('val_batch',0)
     trainsampler, trainloader, validloader, testloader_, dataset_info = get_dataloaders(C.get()['dataset'], C.get()['batch']+val_bs, dataroot, test_ratio, split_idx=cv_fold, get_meta_optimizer_factory=get_meta_optimizer_factory, summary_writer=writers[0])

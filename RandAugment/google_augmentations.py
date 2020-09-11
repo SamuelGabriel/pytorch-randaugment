@@ -259,6 +259,36 @@ brightness = TransformT('Brightness', _enhancer_impl(
     ImageEnhance.Brightness))
 sharpness = TransformT('Sharpness', _enhancer_impl(ImageEnhance.Sharpness))
 
+
+def optionalize(op):
+    # this is useful for ops that ignore their level to make them optional
+    def opt_op(img, level):
+        if level >= PARAMETER_MAX // 2:
+            return op(img, level)
+        else:
+            return img
+    return opt_op
+
+opt_auto_contrast = TransformT(
+    'OptAutoContrast',
+    optionalize(lambda pil_img, level: ImageOps.autocontrast(pil_img)))
+opt_equalize = TransformT(
+    'OptEqualize',
+    optionalize(lambda pil_img, level: ImageOps.equalize(
+        pil_img)))
+
+blend_images = None
+
+def blend(img1, v):
+    if blend_images is None:
+        print("please set google_transformations.blend_images before using the enlarged_randaug search space.")
+    i = np.random.choice(len(blend_images))
+    img2 = blend_images[i]
+    m = float_parameter(v,.4)
+    return Image.blend(img1, img2, m)
+
+sample_pairing = TransformT('SamplePairing',blend)
+
 ALL_TRANSFORMS = [
     identity,
     auto_contrast,
@@ -276,8 +306,30 @@ ALL_TRANSFORMS = [
     translate_y
 ]
 
-
-
+def set_search_space(search_space):
+    global ALL_TRANSFORMS
+    if search_space == 'large':
+        ALL_TRANSFORMS = [
+            identity,
+            opt_auto_contrast,
+            opt_equalize,
+            rotate,
+            solarize,
+            color,
+            posterize,
+            contrast,
+            brightness,
+            sharpness,
+            shear_x,
+            shear_y,
+            translate_x,
+            translate_y,
+            sample_pairing
+        ]
+    else:
+        print("Using standard search space.")
+        if search_space != 'standard':
+            raise ValueError(f"Unknown search space {search_space}")
 def apply_augmentation(aug_idx,m,img):
     return ALL_TRANSFORMS[aug_idx].pil_transformer(1.,m)(img)
 
