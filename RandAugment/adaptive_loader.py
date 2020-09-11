@@ -35,9 +35,12 @@ class AdaptiveLoaderByLabel():
         self.ds = dataset
         self.bs = bs
         self.val_bs = val_bs
-        self.val_loader = torch.utils.data.DataLoader(
-            self.ds, batch_size=val_bs, shuffle=True, num_workers=16, pin_memory=False,
-            sampler=None, drop_last=False)
+        if val_bs:
+            self.val_loader = torch.utils.data.DataLoader(
+                self.ds, batch_size=val_bs, shuffle=True, num_workers=16, pin_memory=False,
+                sampler=None, drop_last=False)
+        else:
+            self.val_loader = []
         self.val_iter = iter(self.val_loader)
 
         idxs = defaultdict(list)
@@ -69,9 +72,12 @@ class AdaptiveLoaderByLabel():
         b = []
         for i in subset_idxs:
             b.append(self.subsets[i][random.randint(0,len(self.subsets[i])-1)])
-        val_x, val_y = next(self.val_iter)
-        return torch.cat([torch.stack([e[0] for e in b]),val_x]), \
-               torch.cat([torch.tensor([e[1] for e in b], dtype=val_y.dtype),val_y])
+        x = torch.stack([e[0] for e in b])
+        y = torch.tensor([e[1] for e in b])
+        if self.val_loader:
+            val_x, val_y = next(self.val_iter)
+            x, y = torch.cat([x,val_x]), torch.cat([y,val_y])
+        return x, y
 
     def compute_weights(self, rewards):
         rewards = (rewards - torch.mean(rewards)) / torch.std(rewards)
@@ -109,6 +115,7 @@ class AdaptiveLoaderByLabel():
     def __iter__(self):
         self.t = 0
         self.epoch = 0
+        del self.val_iter
         self.val_iter = iter(self.val_loader)
         return self
 
