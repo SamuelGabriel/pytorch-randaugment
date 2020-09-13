@@ -236,6 +236,10 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
         if preprocessor_type in ('learned_randaugmentspace','learned_random_randaugmentspace'):
             importance_sampling = False
             assert not preprocessor_flags.get('online_tests_on_model')
+            extra_kwargs = {}
+            if 'possible_num_sequential_transforms' in preprocessor_flags:
+                extra_kwargs['possible_num_sequential_transforms'] = preprocessor_flags['possible_num_sequential_transforms']
+
             image_preprocessor = (LearnedPreprocessorRandaugmentSpace if preprocessor_type == 'learned_randaugmentspace' else LearnedRandAugmentPreprocessor) (dataset_info,
                                                                      preprocessor_flags['hidden_dim'],
                                                                      get_meta_optimizer_factory(),
@@ -251,7 +255,7 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
                                                                      q_residual=preprocessor_flags.get('q_residual',False),
                                                                      label_smoothing_rate=preprocessor_flags.get('label_smoothing_rate',0.),
                                                                      device=torch.device('cuda:0'),
-                                                                     summary_writer=writers[0])
+                                                                     summary_writer=writers[0], **extra_kwargs)
 
         elif preprocessor_type == 'standard_cifar':
             image_preprocessor = StandardCIFARPreprocessor(dataset_info, C.get().get('cutout', 0))

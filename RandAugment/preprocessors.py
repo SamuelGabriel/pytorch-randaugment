@@ -277,11 +277,11 @@ class LearnedPreprocessorRandaugmentSpace(ImagePreprocessor):
                     self.summary_writer.add_scalar(f'PreprocessorWeightsScale/p_{i}', p_, step)
 
 class RandAugmentationSampler(nn.Module):
-    def __init__(self, hidden_dimension, num_transforms, num_scales, max_num_sequential_transforms, q_residual, q_zero_init, scale_embs_zero_init,
+    def __init__(self, hidden_dimension, num_transforms, num_scales, possible_num_sequential_transforms, q_residual, q_zero_init, scale_embs_zero_init,
                  label_smoothing_rate):
         super().__init__()
         self.op_embs = nn.Parameter(torch.normal(0., 1., (num_transforms, hidden_dimension), requires_grad=True))
-        self.num_transforms_embs = nn.Parameter(torch.normal(0., 1., (max_num_sequential_transforms+1, hidden_dimension), requires_grad=True))
+        self.num_transforms_embs = nn.Parameter(torch.normal(0., 1., (len(possible_num_sequential_transforms), hidden_dimension), requires_grad=True))
         if scale_embs_zero_init:
             self.scale_embs = nn.Parameter(torch.zeros(num_scales, hidden_dimension, requires_grad=True))
         else:
@@ -292,6 +292,7 @@ class RandAugmentationSampler(nn.Module):
             self.q = nn.Parameter(torch.normal(0., 1., hidden_dimension, requires_grad=True))
         self.label_smoothing_rate = label_smoothing_rate
         self.q_residual = q_residual
+        self.possible_num_sequential_transforms = possible_num_sequential_transforms
 
     def add_grad_of_copy(self, copy):
         # zero grad beforehand
@@ -309,7 +310,8 @@ class RandAugmentationSampler(nn.Module):
         self.num_transforms_logits = self.num_transforms_embs @ self.q
         self.p_num_transforms = torch.softmax(self.num_transforms_logits, 0)
         self.log_p_num_transforms = torch.log_softmax(self.num_transforms_logits, 0)
-        sampled_num_transforms = torch.multinomial(self.p_num_transforms, num_samples, replacement=True)
+        sampled_transform_indices = torch.multinomial(self.p_num_transforms, num_samples, replacement=True)
+        sampled_num_transforms = self.possible_num_sequential_transforms[sampled_transform_indices]
         augmentation_inds = torch.randint(len(self.op_embs),(num_samples,len(self.p_num_transforms)-1))
         augmentation_mask = torch.arange(len(self.p_num_transforms)-1).unsqueeze(0).expand(num_samples,len(self.p_num_transforms)-1).to(sampled_num_transforms.device) >= sampled_num_transforms.unsqueeze(1)
         augmentation_inds[augmentation_mask] = 0 # index of identity augmentation
@@ -324,7 +326,7 @@ class RandAugmentationSampler(nn.Module):
         flat_log_p_scale = log_p_scale.view(-1,log_p_scale.shape[2])
         log_ps_of_sampled_scales = flat_log_p_scale[torch.arange(len(flat_log_p_scale)),sampled_scales.flatten()].view_as(sampled_scales)
         log_ps_of_sampled_scales[augmentation_mask] = 0.
-        self.logps = self.log_p_num_transforms[sampled_num_transforms] + log_ps_of_sampled_scales.sum(1)
+        self.logps = self.log_p_num_transforms[sampled_transform_indices] + log_ps_of_sampled_scales.sum(1)
         #if self.label_smoothing_rate:
         #    self.logps = (self.log_p_op.mean() * len(sampled_op_idxs) + log_p_scale.mean(1).sum(
         #        0)) * self.label_smoothing_rate \
@@ -335,7 +337,7 @@ class RandAugmentationSampler(nn.Module):
 class LearnedRandAugmentPreprocessor(ImagePreprocessor):
     def __init__(self, dataset_info, hidden_dimension, optimizer_creator, bs, val_bs, entropy_alpha, scale_entropy_alpha=0.,
                  importance_sampling=False, cutout=0, normalize_reward=True, model_for_online_tests=None,
-                 D_out=10, q_zero_init=True, q_residual=False, scale_embs_zero_init=False, label_smoothing_rate=0., max_num_sequential_transforms=5,
+                 D_out=10, q_zero_init=True, q_residual=False, scale_embs_zero_init=False, label_smoothing_rate=0., possible_num_sequential_transforms=[1,2,3,4],
                  **kwargs):
         super().__init__(**kwargs)
         print('using learned preprocessor')
@@ -347,7 +349,7 @@ class LearnedRandAugmentPreprocessor(ImagePreprocessor):
                                                                      device=self.device)
         self.model = model_for_online_tests
 
-        self.augmentation_sampler = RandAugmentationSampler(hidden_dimension, self.num_transforms, self.num_scales, max_num_sequential_transforms,
+        self.augmentation_sampler = RandAugmentationSampler(hidden_dimension, self.num_transforms, self.num_scales, torch.tensor(possible_num_sequential_transforms),
                                                         q_residual, q_zero_init, scale_embs_zero_init,
                                                         label_smoothing_rate).to(self.device)
         self.agumentation_sampler_copies = []
