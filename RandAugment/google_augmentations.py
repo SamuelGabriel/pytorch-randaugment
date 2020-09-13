@@ -347,3 +347,13 @@ class RandAugment:
             img = op.pil_transformer(1.,self.m)(img)
 
         return img
+
+class UniAugment:
+    def __call__(self, img):
+        ops = random.choices(ALL_TRANSFORMS, k=2)
+        for op in ops:
+            probability = random.random()
+            level = random.randint(0,30)
+            img = op.pil_transformer(probability,level)(img)
+        return img
+

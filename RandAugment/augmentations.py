@@ -85,4 +85,7 @@ class CutoutDefault(object):
 
 
 def get_randaugment(n,m):
-    return google_augmentations.RandAugment(n, m)
+    if n == 0 and m == 0:
+        return google_augmentations.UniAugment()
+    else:
+        return google_augmentations.RandAugment(n, m)
