@@ -22,11 +22,14 @@ def conv_init(m):
 
 
 class WideBasic(nn.Module):
-    def __init__(self, in_planes, planes, dropout_rate, stride=1):
+    def __init__(self, in_planes, planes, dropout_rate, stride=1, adaptive_dropouter_creator=None):
         super(WideBasic, self).__init__()
         self.bn1 = nn.BatchNorm2d(in_planes, momentum=_bn_momentum)
         self.conv1 = nn.Conv2d(in_planes, planes, kernel_size=3, padding=1, bias=True)
-        self.dropout = nn.Dropout(p=dropout_rate)
+        if adaptive_dropouter_creator is None:
+            self.dropout = nn.Dropout(p=dropout_rate)
+        else:
+            self.dropout = adaptive_dropouter_creator(planes, 3, stride, 1)
         self.bn2 = nn.BatchNorm2d(planes, momentum=_bn_momentum)
         self.conv2 = nn.Conv2d(planes, planes, kernel_size=3, stride=stride, padding=1, bias=True)
 
@@ -45,15 +48,18 @@ class WideBasic(nn.Module):
 
 
 class WideResNet(nn.Module):
-    def __init__(self, depth, widen_factor, dropout_rate, num_classes, adaptive_dropouter_creator):
+    def __init__(self, depth, widen_factor, dropout_rate, num_classes, adaptive_dropouter_creator, adaptive_conv_dropouter_creator):
         super(WideResNet, self).__init__()
         self.in_planes = 16
+        self.adaptive_conv_dropouter_creator = adaptive_conv_dropouter_creator
 
         assert ((depth - 4) % 6 == 0), 'Wide-resnet depth should be 6n+4'
         n = int((depth - 4) / 6)
         k = widen_factor
 
         nStages = [16, 16*k, 32*k, 64*k]
+
+        self.adaptive_dropouters = [] #nn.ModuleList()
 
         self.conv1 = conv3x3(3, nStages[0])
         self.layer1 = self._wide_layer(WideBasic, nStages[1], n, dropout_rate, stride=1)
@@ -62,9 +68,10 @@ class WideResNet(nn.Module):
         self.bn1 = nn.BatchNorm2d(nStages[3], momentum=_bn_momentum)
         self.linear = nn.Linear(nStages[3], num_classes)
         if adaptive_dropouter_creator is not None:
-            self.adaptive_dropouter = adaptive_dropouter_creator(nStages[3])
+            self.last_dropout = adaptive_dropouter_creator(nStages[3])
+            self.adaptive_dropouters.append(self.last_dropout)
         else:
-            self.adaptive_dropouter = lambda x: x
+            self.last_dropout = lambda x: x
 
         # self.apply(conv_init)
 
@@ -73,7 +80,11 @@ class WideResNet(nn.Module):
         layers = []
 
         for stride in strides:
-            layers.append(block(self.in_planes, planes, dropout_rate, stride))
+            new_block = block(self.in_planes, planes, dropout_rate, stride, adaptive_dropouter_creator=self.adaptive_conv_dropouter_creator)
+            layers.append(new_block)
+            if self.adaptive_conv_dropouter_creator is not None:
+                self.adaptive_dropouters.append(new_block.dropout)
+
             self.in_planes = planes
 
         return nn.Sequential(*layers)
@@ -87,7 +98,7 @@ class WideResNet(nn.Module):
         # out = F.avg_pool2d(out, 8)
         out = F.adaptive_avg_pool2d(out, (1, 1))
         out = out.view(out.size(0), -1)
-        out = self.adaptive_dropouter(out)
+        out = self.last_dropout(out)
         out = self.linear(out)
 
         return out

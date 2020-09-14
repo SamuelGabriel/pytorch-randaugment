@@ -4,6 +4,7 @@ import torch.nn.functional as F
 
 from copy import deepcopy
 import time
+from RandAugment.common import CheckpointFunctionForSampler
 
 class Sampler(nn.Module):
     def __init__(self, num_dropouts, hidden_dimension, out_bias=False, relu=True):
@@ -34,8 +35,58 @@ class Sampler(nn.Module):
             else:
                 p.grad += p_copy.grad
 
+class ConvSampler(nn.Module):
+    def __init__(self, conv_params, hidden_dimension, out_bias=False, relu=True):
+        planes, kernel_size, stride, padding = conv_params
+        super().__init__()
+        self.get_keep_logits = nn.Sequential(
+            nn.BatchNorm2d(planes, momentum=.1),
+            nn.Conv2d(planes, planes, kernel_size=kernel_size, stride=1, padding=kernel_size//2, groups=planes, bias=True),
+            nn.ReLU() if relu else nn.Identity(),
+            nn.Conv2d(planes, planes, kernel_size=1, bias=out_bias)
+        )
+
+
+    def forward(self, state):
+        if True:
+            def get_sample_logps_ce(state):
+                l = self.get_keep_logits(state)
+                p = torch.sigmoid(l)
+                sample = torch.bernoulli(p).to(torch.bool)
+                eps = 10E-6
+                false_logps = torch.log(1. - p + eps)  # problem nan gradients, when p = 1.
+                del p
+                true_logps = torch.nn.functional.logsigmoid(l)
+                del l
+                logps = torch.where(sample, true_logps, false_logps).sum(1).sum(1).sum(1)
+                ce = (.8 * true_logps + (.2) * false_logps).sum()
+                del true_logps, false_logps
+                return sample, logps, ce
+            sample, self.logps, self.ce = CheckpointFunctionForSampler.apply(get_sample_logps_ce, True, state.requires_grad_())
+            sample.detach_()
+        else:
+            l = self.get_keep_logits(state)
+            p = torch.sigmoid(l)
+            #with torch.no_grad():
+            #    print('p[0,:10]',torch.round(p[0,:10] * 10**2) / (10**2))
+            sample = torch.bernoulli(p).to(torch.bool)
+            self.true_logps = torch.nn.functional.logsigmoid(l)
+            eps = 10E-6
+            self.false_logps = torch.log(1.-p+eps) # problem nan gradients, when p = 1.
+            #false_logps = -l - torch.log(1.+torch.exp(-l)) # log(1-sig(l))
+            self.logps = torch.where(sample,self.true_logps,self.false_logps).sum(1).sum(1).sum(1)
+        return sample
+
+    def add_grad_of_copy(self, copy):
+        # zero grad beforehand
+        for p, p_copy in zip(self.parameters(), copy.parameters()):
+            if p.grad is None:
+                p.grad = p_copy.grad
+            else:
+                p.grad += p_copy.grad
+
 class AdaptiveDropouter(nn.Module):
-    def __init__(self, num_dropouts, hidden_dimension, optimizer_creator, train_bs, val_bs, cross_entropy_alpha=None, target_p=None, out_bias=False, relu=True, inference_dropout=False, scale_by_p=False, summary_writer=None):
+    def __init__(self, dropout_shape, hidden_dimension, optimizer_creator, train_bs, val_bs, cross_entropy_alpha=None, target_p=None, out_bias=False, relu=True, inference_dropout=False, scale_by_p=False, summary_writer=None):
         super().__init__()
         self.target_p = target_p
         self.cross_entropy_alpha = cross_entropy_alpha
@@ -46,7 +97,10 @@ class AdaptiveDropouter(nn.Module):
         self.train_bs = train_bs
         self.val_bs = val_bs
 
-        self.sampler = Sampler(num_dropouts,hidden_dimension,out_bias=out_bias,relu=relu)
+        if isinstance(dropout_shape,tuple):
+            self.sampler = ConvSampler(dropout_shape, hidden_dimension, out_bias=out_bias, relu=relu)
+        else:
+            self.sampler = Sampler(dropout_shape,hidden_dimension,out_bias=out_bias,relu=relu)
         self.sampler_copies = []
 
         self.optimizer = optimizer_creator(self.sampler.parameters())
@@ -73,6 +127,7 @@ class AdaptiveDropouter(nn.Module):
         r = keep_mask.detach()*orig_hiddens
         if self.scale_by_p:
             r = r/keep_mask.float().mean()
+        del keep_mask
 
         return r
 
@@ -96,7 +151,10 @@ class AdaptiveDropouter(nn.Module):
         sampler.zero_grad()
         loss = - weights.detach() @ sampler.logps / float(len(weights))
         if self.cross_entropy_alpha is not None and self.target_p is not None:
-            loss -= self.cross_entropy_alpha * (self.target_p * sampler.true_logps + (1.-self.target_p) * sampler.false_logps).sum() / float(len(weights))
+            if hasattr(sampler,'ce') and self.target_p != .8:
+                raise ValueError("You use conv ada dropout, but that only supports target_p = .8 so far.")
+            ce = sampler.ce if hasattr(sampler,'ce') else (self.target_p * sampler.true_logps + (1.-self.target_p) * sampler.false_logps).sum()
+            loss -= self.cross_entropy_alpha * ce / float(len(weights))
 
 
         loss.backward()
@@ -112,9 +170,6 @@ class AdaptiveDropouter(nn.Module):
 
     def write_summary(self, sampler, keep_mask, step):
         if step % 100 == 0 and self.summary_writer is not None and self.training:
-            print('writing summary')
-            print('average_logp', sampler.logps.mean())
-            print('keep_share', keep_mask.float().mean())
             with torch.no_grad():
                 self.summary_writer.add_scalar(f'Dropouter/average_logp', sampler.logps.mean(), step)
                 self.summary_writer.add_scalar(f'Dropouter/keep_share', keep_mask.float().mean(), step)
@@ -145,7 +200,6 @@ class Modulator(nn.Module):
         return m*orig_hiddens
 
     def step(self, diff_alignment):
-        print(len(self.get_multiplier_copies))
         assert len(self.get_multiplier_copies) <= 2
         get_multiplier = self.get_multiplier_copies.pop(0)
 

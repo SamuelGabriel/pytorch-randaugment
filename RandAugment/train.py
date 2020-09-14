@@ -4,6 +4,7 @@ import logging
 import math
 import os
 from collections import OrderedDict
+import gc
 
 import torch
 from torch import nn, optim
@@ -54,10 +55,13 @@ def run_epoch(model, loader, loss_fn, optimizer, desc_default='', epoch=0, write
             actual_model = model.module
         else:
             actual_model = model
-        if hasattr(actual_model, 'adaptive_dropouter') and hasattr(actual_model.adaptive_dropouter, 'step'):
-            getattr(actual_model.adaptive_dropouter, fun_name)(*args, **kwargs)
+        if hasattr(actual_model, 'adaptive_dropouters'):
+            for ada_drop in actual_model.adaptive_dropouters:
+                getattr(ada_drop, fun_name)(*args, **kwargs)
 
     call_attr_on_meta_modules('reset_state')
+    gc.collect()
+    torch.cuda.empty_cache()
     for data, label in logging_loader: # logging loader might be a loader or a loader wrapped into tqdm
         steps += 1
 
@@ -392,7 +396,7 @@ if __name__ == '__main__':
     if args.save:
         add_filehandler(logger, args.save.replace('.pth', '.log'))
 
-    logger.info(json.dumps(C.get().conf, indent=4))
+    #logger.info(json.dumps(C.get().conf, indent=4))
 
     import time
     t = time.time()

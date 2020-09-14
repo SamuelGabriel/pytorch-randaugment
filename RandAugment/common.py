@@ -2,6 +2,7 @@ import logging
 import warnings
 import torch
 from backpack import memory_cleanup
+from torch.utils.checkpoint import check_backward_validity, detach_variable, get_device_states, set_device_states
 
 formatter = logging.Formatter('[%(asctime)s] [%(name)s] [%(levelname)s] %(message)s')
 warnings.filterwarnings("ignore", "(Possibly )?corrupt EXIF data", UserWarning)
@@ -54,3 +55,63 @@ def replace_parameters(optimizer, old_ps, new_ps):
         optimizer.state[n_p] = optimizer.state[o_p]
         del optimizer.state[o_p]
     optimizer.param_groups[0]['params'] = list(new_ps)
+
+
+class CheckpointFunctionForSampler(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx, run_function, preserve_rng_state, *args):
+        check_backward_validity(args)
+        ctx.run_function = run_function
+        if True:
+            ctx.preserve_rng_state = preserve_rng_state
+            if preserve_rng_state:
+                ctx.fwd_cpu_state = torch.get_rng_state()
+                # Don't eagerly initialize the cuda context by accident.
+                # (If the user intends that the context is initialized later, within their
+                # run_function, we SHOULD actually stash the cuda state here.  Unfortunately,
+                # we have no way to anticipate this will happen before we run the function.)
+                ctx.had_cuda_in_fwd = False
+                if torch.cuda._initialized:
+                    ctx.had_cuda_in_fwd = True
+                    ctx.fwd_gpu_devices, ctx.fwd_gpu_states = get_device_states(*args)
+        ctx.save_for_backward(*args)
+        with torch.no_grad():
+            outputs = run_function(*args)
+        sample, logps, ce = outputs
+        ctx.mark_non_differentiable(sample)
+
+        return sample, logps.requires_grad_(), ce.requires_grad_()
+
+    @staticmethod
+    def backward(ctx, *args):
+        if not torch.autograd._is_checkpoint_valid():
+            raise RuntimeError("Checkpointing is not compatible with .grad(), please use .backward() if possible")
+        inputs = ctx.saved_tensors
+        # Stash the surrounding rng state, and mimic the state that was
+        # present at this time during forward.  Restore the surrounding state
+        # when we're done.
+        rng_devices = []
+        if True:
+            if ctx.preserve_rng_state and ctx.had_cuda_in_fwd:
+                rng_devices = ctx.fwd_gpu_devices
+            with torch.random.fork_rng(devices=rng_devices, enabled=ctx.preserve_rng_state):
+                if ctx.preserve_rng_state:
+                    torch.set_rng_state(ctx.fwd_cpu_state)
+                    if ctx.had_cuda_in_fwd:
+                        set_device_states(ctx.fwd_gpu_devices, ctx.fwd_gpu_states)
+                detached_inputs = detach_variable(inputs)
+                with torch.enable_grad():
+                    outputs = ctx.run_function(*detached_inputs)
+        else:
+            with torch.enable_grad():
+                outputs = ctx.run_function(*inputs)
+
+        if isinstance(outputs, torch.Tensor):
+            outputs = (outputs,)
+        torch.autograd.backward(outputs[1:], args[1:])
+        del inputs
+        del outputs
+        del args
+        del ctx.run_function
+        return (None, None) + (None,)
