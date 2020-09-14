@@ -79,10 +79,11 @@ class WideResNet(nn.Module):
         strides = [stride] + [1]*(num_blocks-1)
         layers = []
 
-        for stride in strides:
-            new_block = block(self.in_planes, planes, dropout_rate, stride, adaptive_dropouter_creator=self.adaptive_conv_dropouter_creator)
+        for i,stride in enumerate(strides):
+            ada_conv_drop_c = self.adaptive_conv_dropouter_creator if i == 0 else None
+            new_block = block(self.in_planes, planes, dropout_rate, stride, adaptive_dropouter_creator=ada_conv_drop_c)
             layers.append(new_block)
-            if self.adaptive_conv_dropouter_creator is not None:
+            if ada_conv_drop_c is not None:
                 self.adaptive_dropouters.append(new_block.dropout)
 
             self.in_planes = planes

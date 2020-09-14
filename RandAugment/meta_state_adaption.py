@@ -35,6 +35,9 @@ class Sampler(nn.Module):
             else:
                 p.grad += p_copy.grad
 
+    def cleanup(self):
+        pass
+
 class ConvSampler(nn.Module):
     def __init__(self, conv_params, hidden_dimension, out_bias=False, relu=True):
         planes, kernel_size, stride, padding = conv_params
@@ -76,6 +79,10 @@ class ConvSampler(nn.Module):
             #false_logps = -l - torch.log(1.+torch.exp(-l)) # log(1-sig(l))
             self.logps = torch.where(sample,self.true_logps,self.false_logps).sum(1).sum(1).sum(1)
         return sample
+
+    def cleanup(self):
+        (self.logps.sum()+self.ce).backward()
+        del self.get_keep_logits
 
     def add_grad_of_copy(self, copy):
         # zero grad beforehand
@@ -165,6 +172,8 @@ class AdaptiveDropouter(nn.Module):
         del sampler
 
     def reset_state(self):
+        for c in self.sampler_copies:
+            c.cleanup()
         del self.sampler_copies
         self.sampler_copies = []
 
