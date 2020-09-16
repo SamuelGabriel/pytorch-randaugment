@@ -7,6 +7,23 @@ import numpy as np
 import torch
 from PIL import ImageOps, ImageEnhance, ImageFilter, Image
 import random
+from dataclasses import dataclass
+from typing import Union
+
+@dataclass
+class MinMax:
+    min: Union[float, int]
+    max: Union[float, int]
+
+@dataclass
+class MinMaxVals:
+    shear: MinMax = MinMax(.0, .3)
+    translate: MinMax = MinMax(0, 10)
+    rotate: MinMax = MinMax(0, 30)
+    solarize: MinMax = MinMax(0, 256)
+    posterize: MinMax = MinMax(0, 4)
+    enhancer: MinMax = MinMax(.1,1.9)
+    cutout: MinMax = MinMax(.0,.2)
 
 
 PARAMETER_MAX = 30  # What is the max 'level' a transform could be predicted
@@ -102,7 +119,7 @@ smooth = TransformT(
 
 def _rotate_impl(pil_img, level):
   """Rotates `pil_img` from -30 to 30 degrees depending on `level`."""
-  degrees = int_parameter(level, 30)
+  degrees = int_parameter(level, min_max_vals.rotate.max)
   if random.random() > 0.5:
     degrees = -degrees
   return pil_img.rotate(degrees)
@@ -113,8 +130,8 @@ rotate = TransformT('Rotate', _rotate_impl)
 
 def _posterize_impl(pil_img, level):
   """Applies PIL Posterize to `pil_img`."""
-  level = int_parameter(level, 4)
-  return ImageOps.posterize(pil_img, 4 - level)
+  level = int_parameter(level, min_max_vals.posterize.max - min_max_vals.posterize.min)
+  return ImageOps.posterize(pil_img, min_max_vals.posterize.min + level)
 
 
 posterize = TransformT('Posterize', _posterize_impl)
@@ -134,7 +151,7 @@ def _shear_x_impl(pil_img, level):
   Returns:
     A PIL Image that has had ShearX applied to it.
   """
-  level = float_parameter(level, 0.3)
+  level = float_parameter(level, min_max_vals.shear.max)
   if random.random() > 0.5:
     level = -level
   return pil_img.transform((32, 32), Image.AFFINE, (1, level, 0, 0, 1, 0))
@@ -157,7 +174,7 @@ def _shear_y_impl(pil_img, level):
   Returns:
     A PIL Image that has had ShearX applied to it.
   """
-  level = float_parameter(level, 0.3)
+  level = float_parameter(level, min_max_vals.shear.max)
   if random.random() > 0.5:
     level = -level
   return pil_img.transform((32, 32), Image.AFFINE, (1, 0, 0, level, 1, 0))
@@ -180,7 +197,7 @@ def _translate_x_impl(pil_img, level):
   Returns:
     A PIL Image that has had TranslateX applied to it.
   """
-  level = int_parameter(level, 10)
+  level = int_parameter(level, min_max_vals.translate.max)
   if random.random() > 0.5:
     level = -level
   return pil_img.transform((32, 32), Image.AFFINE, (1, 0, level, 0, 1, 0))
@@ -203,7 +220,7 @@ def _translate_y_impl(pil_img, level):
   Returns:
     A PIL Image that has had TranslateY applied to it.
   """
-  level = int_parameter(level, 10)
+  level = int_parameter(level, min_max_vals.translate.max)
   if random.random() > 0.5:
     level = -level
   return pil_img.transform((32, 32), Image.AFFINE, (1, 0, 0, 0, 1, level))
@@ -238,7 +255,7 @@ def _solarize_impl(pil_img, level):
   Returns:
     A PIL Image that has had Solarize applied to it.
   """
-  level = int_parameter(level, 256)
+  level = int_parameter(level, min_max_vals.solarize.max)
   return ImageOps.solarize(pil_img, 256 - level)
 
 
@@ -248,7 +265,7 @@ solarize = TransformT('Solarize', _solarize_impl)
 def _enhancer_impl(enhancer):
   """Sets level to be between 0.1 and 1.8 for ImageEnhance transforms of PIL."""
   def impl(pil_img, level):
-    v = float_parameter(level, 1.8) + .1  # going to 0 just destroys it
+    v = float_parameter(level, min_max_vals.enhancer.max-min_max_vals.enhancer.min) + min_max_vals.enhancer.min  # going to 0 just destroys it
     return enhancer(pil_img).enhance(v)
   return impl
 
@@ -259,6 +276,26 @@ brightness = TransformT('Brightness', _enhancer_impl(
     ImageEnhance.Brightness))
 sharpness = TransformT('Sharpness', _enhancer_impl(ImageEnhance.Sharpness))
 
+def CutoutDefault(img, v):  # [0, 60] => percentage: [0, 0.2]
+    # assert 0 <= v <= 20
+    if v < 0:
+        return img
+    w, h = img.size
+    x0 = np.random.uniform(w)
+    y0 = np.random.uniform(h)
+
+    x0 = int(max(0, x0 - v / 2.))
+    y0 = int(max(0, y0 - v / 2.))
+    x1 = min(w, x0 + v)
+    y1 = min(h, y0 + v)
+
+    xy = (x0, y0, x1, y1)
+    color = (0, 0, 0)
+    img = img.copy()
+    PIL.ImageDraw.Draw(img).rectangle(xy, color)
+    return img
+
+cutout = TransformT('Cutout', lambda img, l: CutoutDefault(img,int_parameter(l, img.size[0]*min_max_vals.cutout.max)))
 
 def optionalize(op):
     # this is useful for ops that ignore their level to make them optional
@@ -276,6 +313,18 @@ opt_equalize = TransformT(
     'OptEqualize',
     optionalize(lambda pil_img, level: ImageOps.equalize(
         pil_img)))
+opt_invert = TransformT(
+    'OptInvert',
+    optionalize(lambda pil_img, level: ImageOps.invert(
+        pil_img)))
+opt_flip_lr = TransformT(
+    'OptFlipLR',
+    optionalize(lambda pil_img, level: pil_img.transpose(Image.FLIP_LEFT_RIGHT)))
+opt_flip_ud = TransformT(
+    'OptFlipUD',
+    optionalize(lambda pil_img, level: pil_img.transpose(Image.FLIP_TOP_BOTTOM)))
+opt_blur = TransformT(
+    'OptBlur', optionalize(lambda pil_img, level: pil_img.filter(ImageFilter.BLUR)))
 
 blend_images = None
 
@@ -306,9 +355,22 @@ ALL_TRANSFORMS = [
     translate_y
 ]
 
+min_max_vals = MinMaxVals()
+
 def set_search_space(search_space):
-    global ALL_TRANSFORMS
-    if search_space == 'large':
+    global ALL_TRANSFORMS, min_max_vals
+    if 'wide' in search_space:
+        min_max_vals = MinMaxVals(
+            shear=MinMax(.0,.99),
+            translate=MinMax(0,32),
+            rotate=MinMax(0,135),
+            solarize=MinMax(0,256),
+            posterize=MinMax(2,8),
+            enhancer=MinMax(.01,2.),
+            cutout=MinMax(.0,.6),
+        )
+
+    if 'long' in search_space:
         ALL_TRANSFORMS = [
             identity,
             opt_auto_contrast,
@@ -324,11 +386,16 @@ def set_search_space(search_space):
             shear_y,
             translate_x,
             translate_y,
-            sample_pairing
+            #sample_pairing,
+            opt_blur,
+            opt_invert,
+            opt_flip_lr,
+            opt_flip_ud,
+            cutout
         ]
     else:
-        print("Using standard search space.")
-        if search_space != 'standard':
+        print("Using standard aug ops.")
+        if 'standard' not in search_space:
             raise ValueError(f"Unknown search space {search_space}")
 def apply_augmentation(aug_idx,m,img):
     return ALL_TRANSFORMS[aug_idx].pil_transformer(1.,m)(img)
@@ -353,7 +420,7 @@ class UniAugment:
         ops = random.choices(ALL_TRANSFORMS, k=2)
         for op in ops:
             probability = random.random()
-            level = random.randint(0,30)
+            level = random.randint(0,PARAMETER_MAX)
             img = op.pil_transformer(probability,level)(img)
         return img
 
