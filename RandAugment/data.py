@@ -13,6 +13,7 @@ from theconf import Config as C
 from RandAugment.augmentations import *
 from RandAugment.common import get_logger
 from RandAugment.imagenet import ImageNet
+from RandAugment.dataset.noised_cifar10 import NoisedCIFAR10, TargetNoisedCIFAR10
 
 from RandAugment.augmentations import Lighting
 from RandAugment.adaptive_loader import AdaptiveLoaderByLabel
@@ -89,6 +90,12 @@ def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_
     if dataset == 'cifar10':
         total_trainset = torchvision.datasets.CIFAR10(root=dataroot, train=True, download=True, transform=transform_train)
         testset = torchvision.datasets.CIFAR10(root=dataroot, train=False, download=True, transform=transform_test)
+    elif dataset == 'noised_cifar10':
+        total_trainset = NoisedCIFAR10(root=dataroot, train=True, download=True, transform=transform_train)
+        testset = torchvision.datasets.CIFAR10(root=dataroot, train=False, download=True, transform=transform_test)
+    elif dataset == 'targetnoised_cifar10':
+        total_trainset = TargetNoisedCIFAR10(root=dataroot, train=True, download=True, transform=transform_train)
+        testset = torchvision.datasets.CIFAR10(root=dataroot, train=False, download=True, transform=transform_test)
     elif dataset == 'cifar100':
         total_trainset = torchvision.datasets.CIFAR100(root=dataroot, train=True, download=True, transform=transform_train)
         testset = torchvision.datasets.CIFAR100(root=dataroot, train=False, download=True, transform=transform_test)
@@ -98,8 +105,8 @@ def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_
         total_trainset = ConcatDataset([trainset, extraset])
         testset = torchvision.datasets.SVHN(root=dataroot, split='test', download=True, transform=transform_test)
     elif dataset == 'imagenet':
-        total_trainset = ImageNet(root=os.path.join(dataroot, 'imagenet-pytorch'), download=True, transform=transform_train)
-        testset = ImageNet(root=os.path.join(dataroot, 'imagenet-pytorch'), download=True, split='val', transform=transform_test)
+        total_trainset = torchvision.datasets.ImageNet(root=os.path.join(dataroot, 'imagenet-pytorch'), transform=transform_train)
+        testset = torchvision.datasets.ImageNet(root=os.path.join(dataroot, 'imagenet-pytorch'), split='val', transform=transform_test)
 
         # compatibility
         total_trainset.targets = [lb for _, lb in total_trainset.samples]
