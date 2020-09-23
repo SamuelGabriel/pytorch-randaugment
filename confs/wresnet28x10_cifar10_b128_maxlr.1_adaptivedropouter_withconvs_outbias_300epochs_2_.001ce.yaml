@@ -1,0 +1,44 @@
+model:
+  type: wresnet28_10
+  adaptive_dropouter:
+    hidden_size: 100
+    relu: true
+    simple_dropout: false
+    out_bias: true
+    target_p: .8
+    cross_entropy_alpha: .001
+    inference_dropout: false
+    conv_dropout: true
+    scale_by_p: true
+dataset: cifar10
+cutout: 16
+aug: randaugment
+randaug:
+  N: 3
+  M: 5    # from appendix
+
+alignment_loss:
+  summation: standard
+  align_with: '2'
+  val_share: .0
+  alignment_type: dot
+
+meta_opt:
+  meta_optimizer:
+    type: adam
+    lr: .001
+    beta1: .0
+    beta2: .999
+
+batch: 128
+epoch: 300
+lr: 0.05
+lr_schedule:
+  type: 'cosine'
+  warmup:
+    multiplier: 2
+    epoch: 5
+optimizer:
+  type: sgd
+  nesterov: True
+  decay: 0.0005
