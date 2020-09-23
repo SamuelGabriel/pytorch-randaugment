@@ -369,6 +369,10 @@ def set_search_space(search_space):
             enhancer=MinMax(.01,2.),
             cutout=MinMax(.0,.6),
         )
+    elif 'fix' in search_space:
+        min_max_vals = MinMaxVals(
+            posterize=MinMax(4,8)
+        )
 
     if 'long' in search_space:
         ALL_TRANSFORMS = [
