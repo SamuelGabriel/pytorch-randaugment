@@ -6,6 +6,8 @@ import torch
 from torch.utils.data import DataLoader,Subset
 from collections import defaultdict
 
+from RandAugment.common import sigmax, log_sigmax, relabssum, log_relabssum
+
 #torch.utils.data.DataLoader(
 #        total_trainset, batch_size=batch, shuffle=True, num_workers=16, pin_memory=True,
 #        sampler=valid_sampler, drop_last=False)
@@ -16,10 +18,10 @@ class Sampler(torch.nn.Module):
         self.logits = torch.nn.Parameter(torch.zeros(num_subsets), requires_grad=True)  # keep on cpu, since small
 
     def forward(self, bs):
-        self.p = torch.softmax(self.logits, 0)
-        sample = torch.multinomial(self.p, bs, replacement=True)
-        self.logps = torch.log_softmax(self.logits[sample], 0)
-        return sample
+        self.p = sigmax(self.logits, 0)
+        self.sample = torch.multinomial(self.p, bs, replacement=True)
+        self.logps = log_sigmax(self.logits[self.sample], 0)
+        return self.sample
 
     def add_grad_of_copy(self, copy):
         # zero grad beforehand
@@ -42,11 +44,16 @@ class AdaptiveLoaderByLabel():
         else:
             self.val_loader = []
         self.val_iter = iter(self.val_loader)
+        self.epoch = -1
 
         idxs = defaultdict(list)
-        for idx, (_, label) in enumerate(dataset):
+        for idx, values in enumerate(dataset):
+            label = values[-1]
             idxs[label].append(idx)
-        self.subsets = [Subset(dataset,idx_set) for idx_set in idxs.values()]
+        self.subsets = [Subset(dataset,idxs[label]) for label in sorted(idxs.keys())]
+        self.avg_batch_alignments = torch.tensor([0.] * len(idxs))
+        self.avg_normalized_reward = torch.tensor([0.] * len(idxs))
+        self.num_uses_of_partitions = torch.tensor([0] * len(idxs))
 
         self.sampler = Sampler(len(self.subsets))
         self.sampler_copies = []
@@ -75,7 +82,8 @@ class AdaptiveLoaderByLabel():
         x = torch.stack([e[0] for e in b])
         y = torch.tensor([e[1] for e in b])
         if self.val_loader:
-            val_x, val_y = next(self.val_iter)
+            val_batch = next(self.val_iter)
+            val_x, val_y = val_batch[:2]
             x, y = torch.cat([x,val_x]), torch.cat([y,val_y])
         return x, y
 
@@ -84,14 +92,23 @@ class AdaptiveLoaderByLabel():
         return rewards
 
     def step(self, rewards):
-        assert len(self.sampler_copies) == 2
+        assert len(self.sampler_copies) <= 2
         sampler = self.sampler_copies.pop(0)
+        self.num_uses_of_partitions.scatter_add_(0, sampler.sample.cpu(), torch.ones_like(sampler.sample.cpu()))
+        self.avg_batch_alignments.scatter_add_(0, sampler.sample.cpu(), rewards.cpu())
         if self.get_total_t() % 100 == 50 and self.summary_writer is not None:
             for i in range(len(sampler.p)):
                 self.summary_writer.add_scalar(f'DatasetDistribution/p{i}', sampler.p[i], self.get_total_t())
+            for i, x in enumerate(self.avg_batch_alignments):
+                self.summary_writer.add_scalar(f'AverageAlignment/c{i}', x/self.num_uses_of_partitions[i], self.get_total_t())
         with torch.no_grad():
             rewards = rewards.to(sampler.logps.device)
             weights = self.compute_weights(rewards).detach()
+        self.avg_normalized_reward.scatter_add_(0, sampler.sample.cpu(), weights.cpu())
+        if self.get_total_t() % 100 == 50 and self.summary_writer is not None:
+            print(self.avg_normalized_reward/self.num_uses_of_partitions)
+            for i, x in enumerate(self.avg_normalized_reward):
+                self.summary_writer.add_scalar(f'AverageNormalizedReward/c{i}', x/self.num_uses_of_partitions[i], self.get_total_t())
 
         sampler.zero_grad()
         loss = - weights.detach() @ sampler.logps / float(len(weights))
@@ -114,7 +131,7 @@ class AdaptiveLoaderByLabel():
 
     def __iter__(self):
         self.t = 0
-        self.epoch = 0
+        self.epoch += 1
         del self.val_iter
         self.val_iter = iter(self.val_loader)
         return self
