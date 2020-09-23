@@ -50,6 +50,8 @@ def recursive_backpack_memory_cleanup(module: torch.nn.Module):
         memory_cleanup(m)
 
 def replace_parameters(optimizer, old_ps, new_ps):
+    new_ps, old_ps = list(new_ps), list(old_ps)
+    assert len(new_ps) == len(old_ps)
     assert len(optimizer.param_groups) == 1
     for o_p, n_p in zip(old_ps,new_ps):
         optimizer.state[n_p] = optimizer.state[o_p]
@@ -115,3 +117,18 @@ class CheckpointFunctionForSampler(torch.autograd.Function):
         del args
         del ctx.run_function
         return (None, None) + (None,)
+
+def log_sigmax(logits, d):
+    return - torch.log(1.+torch.exp(-logits)) - torch.log(torch.sigmoid(logits).sum(d, keepdim=True))
+
+def sigmax(logits, d):
+    sigs = torch.sigmoid(logits)
+    return sigs / sigs.sum(d, keepdim=True)
+
+def relabssum(logits, d):
+    abslogits = logits.abs() + .00001
+    return abslogits / abslogits.sum(d, keepdim=True)
+
+def log_relabssum(logits, d):
+    return torch.log(relabssum(logits,d))
+

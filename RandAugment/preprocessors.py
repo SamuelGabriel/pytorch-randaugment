@@ -5,6 +5,7 @@ from abc import abstractmethod, ABCMeta
 from torchvision import transforms
 from RandAugment import google_augmentations, augmentations
 from RandAugment.networks.convnet import SeqConvNet
+from RandAugment.common import sigmax, log_sigmax
 
 from copy import deepcopy
 
@@ -86,8 +87,9 @@ class StandardCIFARPreprocessor(ImagePreprocessor):
 
 class AugmentationSampler(nn.Module):
     def __init__(self, hidden_dimension, num_transforms, num_scales, q_residual, q_zero_init, scale_embs_zero_init,
-                 label_smoothing_rate, usemodel_Dout_imgdims=(False, 10, None)):
+                 label_smoothing_rate, usemodel_Dout_imgdims=(False, 10, None), dist_functions=(torch.softmax, torch.log_softmax)):
         super().__init__()
+        self.dist, self.log_dist = dist_functions
         self.op_embs = nn.Parameter(torch.normal(0., 1., (num_transforms, hidden_dimension), requires_grad=True))
         if scale_embs_zero_init:
             self.scale_embs = nn.Parameter(torch.zeros(num_scales, hidden_dimension, requires_grad=True))
@@ -136,15 +138,15 @@ class AugmentationSampler(nn.Module):
     def forward(self, num_samples, model=None):
         self.q = self.compute_q(model)
         self.op_logits = self.op_embs @ self.q
-        self.p_op = torch.softmax(self.op_logits, 0)
-        self.log_p_op = torch.log_softmax(self.op_logits, 0)
+        self.p_op = self.dist(self.op_logits, 0)
+        self.log_p_op = self.log_dist(self.op_logits, 0)
         sampled_op_idxs = torch.multinomial(self.p_op, num_samples, replacement=True)
         hidden = self.op_embs[sampled_op_idxs]
         if self.q_residual:
             hidden += self.q
         scale_logits = hidden @ self.scale_embs.t()
-        p_scale = torch.softmax(scale_logits, 1)
-        log_p_scale = torch.log_softmax(scale_logits, 1)
+        p_scale = self.dist(scale_logits, 1)
+        log_p_scale = self.log_dist(scale_logits, 1)
         sampled_scales = torch.multinomial(p_scale, 1, replacement=True).squeeze()
         self.logps = self.log_p_op[sampled_op_idxs] + log_p_scale[torch.arange(log_p_scale.shape[0]), sampled_scales]
         if self.label_smoothing_rate:
@@ -158,7 +160,7 @@ class LearnedPreprocessorRandaugmentSpace(ImagePreprocessor):
     def __init__(self, dataset_info, hidden_dimension, optimizer_creator, bs, val_bs, entropy_alpha, scale_entropy_alpha=0.,
                  importance_sampling=False, cutout=0, normalize_reward=True, model_for_online_tests=None,
                  D_out=10, q_zero_init=True, q_residual=False, scale_embs_zero_init=False, label_smoothing_rate=0.,
-                 **kwargs):
+                 sigmax_dist=False, **kwargs):
         super().__init__(**kwargs)
         print('using learned preprocessor')
 
@@ -171,8 +173,10 @@ class LearnedPreprocessorRandaugmentSpace(ImagePreprocessor):
 
         self.augmentation_sampler = AugmentationSampler(hidden_dimension, self.num_transforms, self.num_scales,
                                                         q_residual, q_zero_init, scale_embs_zero_init,
-                                                        label_smoothing_rate, usemodel_Dout_imgdims=(
-            self.model is not None, D_out, img_dims)).to(self.device)
+                                                        label_smoothing_rate,
+                                                        usemodel_Dout_imgdims=(self.model is not None, D_out, img_dims),
+                                                        dist_functions=(sigmax, log_sigmax) if sigmax_dist
+                                                        else (torch.softmax, torch.log_softmax)).to(self.device)
         self.agumentation_sampler_copies = []
 
         self.normalize_reward = normalize_reward
@@ -231,8 +235,8 @@ class LearnedPreprocessorRandaugmentSpace(ImagePreprocessor):
             if aug_sampler.q_residual:
                 hidden = aug_sampler.op_embs + aug_sampler.q
             scale_logits = hidden @ aug_sampler.scale_embs.t()
-            log_p_scale = torch.log_softmax(scale_logits, 1)
-            p_scale = torch.softmax(scale_logits, 1)
+            log_p_scale = aug_sampler.log_dist(scale_logits, 1)
+            p_scale = aug_sampler.dist(scale_logits, 1)
             avg_neg_entropy = torch.einsum('bh,bh->b', p_scale, (
                         log_p_scale * (p_scale != 0.))).mean()  # here we could have logp = -inf and p = 0.
             loss += self.scale_entropy_alpha * avg_neg_entropy
@@ -261,14 +265,14 @@ class LearnedPreprocessorRandaugmentSpace(ImagePreprocessor):
             with torch.no_grad():
                 q = aug_sampler.compute_q()  # need to compute q here, because of print in first step
                 op_logits = aug_sampler.op_embs @ q
-                p = torch.softmax(op_logits, 0)
+                p = aug_sampler.dist(op_logits, 0)
                 for i, p_ in enumerate(p):
                     self.summary_writer.add_scalar(f'PreprocessorWeights/p_{i}', p_, step)
                 hidden = aug_sampler.op_embs
                 if aug_sampler.q_residual:
                     hidden += q
                 scale_logits = hidden @ aug_sampler.scale_embs.t()
-                p_scale = torch.softmax(scale_logits, 1)
+                p_scale = aug_sampler.dist(scale_logits, 1)
                 for aug_idx, scale_dist in enumerate(p_scale):
                     self.summary_writer.add_scalar(f'MaxScale/aug_{aug_idx}', torch.argmax(scale_dist), step)
                 for aug_idx, scale_dist in enumerate(p_scale):
@@ -278,8 +282,9 @@ class LearnedPreprocessorRandaugmentSpace(ImagePreprocessor):
 
 class RandAugmentationSampler(nn.Module):
     def __init__(self, hidden_dimension, num_transforms, num_scales, possible_num_sequential_transforms, q_residual, q_zero_init, scale_embs_zero_init,
-                 label_smoothing_rate):
+                 label_smoothing_rate, distribution_functions):
         super().__init__()
+        self.dist, self.log_dist = distribution_functions
         self.op_embs = nn.Parameter(torch.normal(0., 1., (num_transforms, hidden_dimension), requires_grad=True))
         self.num_transforms_embs = nn.Parameter(torch.normal(0., 1., (len(possible_num_sequential_transforms), hidden_dimension), requires_grad=True))
         if scale_embs_zero_init:
@@ -308,8 +313,8 @@ class RandAugmentationSampler(nn.Module):
     def forward(self, num_samples, model=None):
         self.q = self.compute_q(model)
         self.num_transforms_logits = self.num_transforms_embs @ self.q
-        self.p_num_transforms = torch.softmax(self.num_transforms_logits, 0)
-        self.log_p_num_transforms = torch.log_softmax(self.num_transforms_logits, 0)
+        self.p_num_transforms = self.dist(self.num_transforms_logits, 0)
+        self.log_p_num_transforms = self.log_dist(self.num_transforms_logits, 0)
         sampled_transform_indices = torch.multinomial(self.p_num_transforms, num_samples, replacement=True)
         sampled_num_transforms = self.possible_num_sequential_transforms[sampled_transform_indices]
         augmentation_inds = torch.randint(len(self.op_embs),(num_samples,len(self.p_num_transforms)-1))
@@ -319,8 +324,8 @@ class RandAugmentationSampler(nn.Module):
         if self.q_residual:
             hidden += self.q
         scale_logits = hidden @ self.scale_embs.t()
-        p_scale = torch.softmax(scale_logits, 2)
-        log_p_scale = torch.log_softmax(scale_logits, 2)
+        p_scale = self.dist(scale_logits, 2)
+        log_p_scale = self.log_dist(scale_logits, 2)
         sampled_scales = torch.multinomial(p_scale.view(-1,p_scale.shape[2]), 1, replacement=True).view(p_scale.shape[:2])
         #log_ps_of_sampled_scales = torch.gather(log_p_scale,1,sampled_scales)
         flat_log_p_scale = log_p_scale.view(-1,log_p_scale.shape[2])
@@ -337,7 +342,8 @@ class RandAugmentationSampler(nn.Module):
 class LearnedRandAugmentPreprocessor(ImagePreprocessor):
     def __init__(self, dataset_info, hidden_dimension, optimizer_creator, bs, val_bs, entropy_alpha, scale_entropy_alpha=0.,
                  importance_sampling=False, cutout=0, normalize_reward=True, model_for_online_tests=None,
-                 D_out=10, q_zero_init=True, q_residual=False, scale_embs_zero_init=False, label_smoothing_rate=0., possible_num_sequential_transforms=[1,2,3,4],
+                 D_out=10, q_zero_init=True, q_residual=False, scale_embs_zero_init=False, label_smoothing_rate=0.,
+                 possible_num_sequential_transforms=[1,2,3,4], sigmax_dist=False,
                  **kwargs):
         super().__init__(**kwargs)
         print('using learned preprocessor')
@@ -351,7 +357,7 @@ class LearnedRandAugmentPreprocessor(ImagePreprocessor):
 
         self.augmentation_sampler = RandAugmentationSampler(hidden_dimension, self.num_transforms, self.num_scales, torch.tensor(possible_num_sequential_transforms),
                                                         q_residual, q_zero_init, scale_embs_zero_init,
-                                                        label_smoothing_rate).to(self.device)
+                                                        label_smoothing_rate, (sigmax, log_sigmax) if sigmax_dist else (torch.softmax, torch.log_softmax)).to(self.device)
         self.agumentation_sampler_copies = []
         self.bs = bs
         self.val_bs = val_bs
@@ -412,8 +418,8 @@ class LearnedRandAugmentPreprocessor(ImagePreprocessor):
             if aug_sampler.q_residual:
                 hidden = aug_sampler.op_embs + aug_sampler.q
             scale_logits = hidden @ aug_sampler.scale_embs.t()
-            log_p_scale = torch.log_softmax(scale_logits, 1)
-            p_scale = torch.softmax(scale_logits, 1)
+            log_p_scale = aug_sampler.log_dist(scale_logits, 1)
+            p_scale = aug_sampler.dist(scale_logits, 1)
             avg_neg_entropy = torch.einsum('bh,bh->b', p_scale, (
                         log_p_scale * (p_scale != 0.))).mean()  # here we could have logp = -inf and p = 0.
             loss += self.scale_entropy_alpha * avg_neg_entropy
@@ -439,7 +445,7 @@ class LearnedRandAugmentPreprocessor(ImagePreprocessor):
                 if aug_sampler.q_residual:
                     hidden += aug_sampler.compute_q()
                 scale_logits = hidden @ aug_sampler.scale_embs.t()
-                p_scale = torch.softmax(scale_logits, 1)
+                p_scale = aug_sampler.dist(scale_logits, 1)
                 for aug_idx, scale_dist in enumerate(p_scale):
                     self.summary_writer.add_scalar(f'AvgScale/aug_{aug_idx}', scale_dist @ torch.arange(scale_dist.shape[-1],dtype=scale_dist.dtype,device=scale_dist.device), step)
                 for aug_idx, scale_dist in enumerate(p_scale):
