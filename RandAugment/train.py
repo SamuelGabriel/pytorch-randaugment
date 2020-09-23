@@ -5,6 +5,7 @@ import math
 import os
 from collections import OrderedDict
 import gc
+import resource
 
 import torch
 from torch import nn, optim
@@ -32,7 +33,7 @@ logger = get_logger('RandAugment')
 logger.setLevel(logging.INFO)
 
 
-def run_epoch(model, loader, loss_fn, optimizer, desc_default='', epoch=0, writer=None, verbose=1, scheduler=None, preprocessor=None):
+def run_epoch(model, loader, loss_fn, optimizer, desc_default='', epoch=0, writer=None, verbose=1, scheduler=None, preprocessor=None,sec_optimizer=None):
     tqdm_disable = bool(os.environ.get('TASK_NAME', ''))    # KakaoBrain Environment
     if verbose:
         logging_loader = tqdm(loader, disable=tqdm_disable)
@@ -57,12 +58,19 @@ def run_epoch(model, loader, loss_fn, optimizer, desc_default='', epoch=0, write
             actual_model = model
         if hasattr(actual_model, 'adaptive_dropouters'):
             for ada_drop in actual_model.adaptive_dropouters:
-                getattr(ada_drop, fun_name)(*args, **kwargs)
+                if hasattr(ada_drop, 'step'):
+                    getattr(ada_drop, fun_name)(*args, **kwargs)
 
-    call_attr_on_meta_modules('reset_state')
+    if optimizer:
+        call_attr_on_meta_modules('reset_state')
+        call_attr_on_meta_modules('train')
+    else:
+        call_attr_on_meta_modules('eval')
     gc.collect()
     torch.cuda.empty_cache()
-    for data, label in logging_loader: # logging loader might be a loader or a loader wrapped into tqdm
+    print('mem usage', resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    for batch in logging_loader: # logging loader might be a loader or a loader wrapped into tqdm
+        data, label = batch[:2]
         steps += 1
 
 
@@ -75,6 +83,7 @@ def run_epoch(model, loader, loss_fn, optimizer, desc_default='', epoch=0, write
             optimizer.zero_grad()
             #for p in model.parameters(): p.grad = None
 
+        recursive_backpack_memory_cleanup(model)
         preds = model(data)
         if 'test' in desc_default:
             recursive_backpack_memory_cleanup(model)
@@ -137,6 +146,8 @@ def run_epoch(model, loader, loss_fn, optimizer, desc_default='', epoch=0, write
             if C.get()['optimizer'].get('clip', 5) > 0:
                 nn.utils.clip_grad_norm_(model.parameters(), C.get()['optimizer'].get('clip', 5))
             optimizer.step()
+            if sec_optimizer is not None:
+                sec_optimizer.step()
             del ga
 
         top1, top5 = accuracy(preds, label, (1, 5))
@@ -193,6 +204,15 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
             elif mo_flags['type'] == 'sgd':
                 def get_meta_optimizer(es_optimized_variables):
                     return torch.optim.SGD(es_optimized_variables, lr=mo_flags['lr'], momentum=mo_flags['beta1'])
+            elif mo_flags['type'] == 'same_as_main':
+                def get_meta_optimizer(es_optimized_variables):
+                    return optim.SGD(
+                        es_optimized_variables,
+                        lr=C.get()['lr'],
+                        momentum=C.get()['optimizer'].get('momentum', 0.9),
+                        weight_decay=C.get()['optimizer']['decay'],
+                        nesterov=C.get()['optimizer']['nesterov']
+                    )
             else:
                 raise ValueError()
         else:
@@ -209,7 +229,7 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
     criterion = nn.CrossEntropyLoss()
     if C.get()['optimizer']['type'] == 'sgd':
         optimizer = optim.SGD(
-            model.parameters(), # zeroing is done using a loop so please do not add other parameters
+            model.parameters(),
             lr=C.get()['lr'],
             momentum=C.get()['optimizer'].get('momentum', 0.9),
             weight_decay=C.get()['optimizer']['decay'],
@@ -218,11 +238,18 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
     else:
         raise ValueError('invalid optimizer type=%s' % C.get()['optimizer']['type'])
 
+    if 'sec_optimizer' in C.get() and C.get()['sec_optimizer']['type'] == 'adam':
+        sec_optimizer = optim.Adam(model.parameters())
+    else:
+        sec_optimizer = None
+
     lr_scheduler_type = C.get()['lr_schedule'].get('type', 'cosine')
     if lr_scheduler_type == 'cosine':
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=C.get()['epoch'], eta_min=0.)
     elif lr_scheduler_type == 'resnet':
         scheduler = adjust_learning_rate_resnet(optimizer)
+    elif lr_scheduler_type == 'constant':
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda e: 1.)
     else:
         raise ValueError('invalid lr_schduler=%s' % lr_scheduler_type)
 
@@ -258,7 +285,7 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
                                                                      scale_embs_zero_init=preprocessor_flags.get('scale_embs_zero_init',False),
                                                                      q_residual=preprocessor_flags.get('q_residual',False),
                                                                      label_smoothing_rate=preprocessor_flags.get('label_smoothing_rate',0.),
-                                                                     device=torch.device('cuda:0'),
+                                                                     device=torch.device('cuda:0'), sigmax_dist=preprocessor_flags['sigmax_dist'],
                                                                      summary_writer=writers[0], **extra_kwargs)
 
         elif preprocessor_type == 'standard_cifar':
@@ -318,7 +345,7 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
         model.train()
         if image_preprocessor: image_preprocessor.train()
         rs = dict()
-        rs['train'] = run_epoch(extend(model) if 'meta_opt' in C.get() else model, trainloader, criterion, optimizer, desc_default='train', epoch=epoch, writer=writers[0], verbose=True, scheduler=scheduler, preprocessor=image_preprocessor)
+        rs['train'] = run_epoch(extend(model) if 'meta_opt' in C.get() else model, trainloader, criterion, optimizer, desc_default='train', epoch=epoch, writer=writers[0], verbose=True, scheduler=scheduler, preprocessor=image_preprocessor, sec_optimizer=sec_optimizer)
         model.eval()
         if image_preprocessor: image_preprocessor.eval()
 
