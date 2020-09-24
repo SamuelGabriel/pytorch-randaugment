@@ -286,6 +286,7 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
                                                                      q_residual=preprocessor_flags.get('q_residual',False),
                                                                      label_smoothing_rate=preprocessor_flags.get('label_smoothing_rate',0.),
                                                                      device=torch.device('cuda:0'), sigmax_dist=preprocessor_flags['sigmax_dist'],
+                                                                     use_images_for_sampler=preprocessor_flags['use_images_for_sampler'],
                                                                      summary_writer=writers[0], **extra_kwargs)
 
         elif preprocessor_type == 'standard_cifar':

@@ -160,9 +160,10 @@ class LearnedPreprocessorRandaugmentSpace(ImagePreprocessor):
     def __init__(self, dataset_info, hidden_dimension, optimizer_creator, bs, val_bs, entropy_alpha, scale_entropy_alpha=0.,
                  importance_sampling=False, cutout=0, normalize_reward=True, model_for_online_tests=None,
                  D_out=10, q_zero_init=True, q_residual=False, scale_embs_zero_init=False, label_smoothing_rate=0.,
-                 sigmax_dist=False, **kwargs):
+                 sigmax_dist=False, use_images_for_sampler=False, **kwargs):
         super().__init__(**kwargs)
         print('using learned preprocessor')
+        assert not use_images_for_sampler
 
         img_dims = dataset_info['img_dims']
         self.num_transforms = google_augmentations.num_augmentations()
@@ -282,7 +283,7 @@ class LearnedPreprocessorRandaugmentSpace(ImagePreprocessor):
 
 class RandAugmentationSampler(nn.Module):
     def __init__(self, hidden_dimension, num_transforms, num_scales, possible_num_sequential_transforms, q_residual, q_zero_init, scale_embs_zero_init,
-                 label_smoothing_rate, distribution_functions):
+                 label_smoothing_rate, distribution_functions, use_images):
         super().__init__()
         self.dist, self.log_dist = distribution_functions
         self.op_embs = nn.Parameter(torch.normal(0., 1., (num_transforms, hidden_dimension), requires_grad=True))
@@ -291,12 +292,21 @@ class RandAugmentationSampler(nn.Module):
             self.scale_embs = nn.Parameter(torch.zeros(num_scales, hidden_dimension, requires_grad=True))
         else:
             self.scale_embs = nn.Parameter(torch.normal(0., 1., (num_scales, hidden_dimension), requires_grad=True))
-        if q_zero_init:
-            self.q = nn.Parameter(torch.zeros(hidden_dimension, requires_grad=True))
-        else:
-            self.q = nn.Parameter(torch.normal(0., 1., hidden_dimension, requires_grad=True))
         self.label_smoothing_rate = label_smoothing_rate
         self.q_residual = q_residual
+        self.use_images = use_images
+        if use_images:
+            self.convnet = SeqConvNet(hidden_dimension)
+            if q_zero_init:
+                with torch.no_grad():
+                    self.convnet.final_fc.weight.zero_()
+                    self.convnet.final_fc.bias.zero_()
+        else:
+            if q_zero_init:
+                self.q = nn.Parameter(torch.zeros(hidden_dimension, requires_grad=True))
+            else:
+                self.q = nn.Parameter(torch.normal(0., 1., hidden_dimension, requires_grad=True))
+
         self.possible_num_sequential_transforms = possible_num_sequential_transforms
 
     def add_grad_of_copy(self, copy):
@@ -307,35 +317,35 @@ class RandAugmentationSampler(nn.Module):
             else:
                 p.grad += p_copy.grad
 
-    def compute_q(self, model=None):
-        return self.q
+    def compute_q(self, imgs):
+        if self.use_images:
+            image_batch = torch.stack([torchvision.transforms.ToTensor()(i) for i in imgs]).to(self.convnet.final_fc.weight.device)
+            return self.convnet(image_batch)
+        else:
+            return self.q.unsqueeze(0).expand(len(imgs),-1)
 
-    def forward(self, num_samples, model=None):
-        self.q = self.compute_q(model)
-        self.num_transforms_logits = self.num_transforms_embs @ self.q
-        self.p_num_transforms = self.dist(self.num_transforms_logits, 0)
-        self.log_p_num_transforms = self.log_dist(self.num_transforms_logits, 0)
-        sampled_transform_indices = torch.multinomial(self.p_num_transforms, num_samples, replacement=True)
+    def forward(self, imgs):
+        num_samples = len(imgs)
+        self.q = self.compute_q(imgs)
+        self.num_transforms_logits = self.q @ self.num_transforms_embs.t()
+        self.p_num_transforms = self.dist(self.num_transforms_logits, -1)
+        self.log_p_num_transforms = self.log_dist(self.num_transforms_logits, -1)
+        sampled_transform_indices = torch.multinomial(self.p_num_transforms, 1, replacement=True).squeeze(1)
         sampled_num_transforms = self.possible_num_sequential_transforms[sampled_transform_indices]
-        augmentation_inds = torch.randint(len(self.op_embs),(num_samples,len(self.p_num_transforms)-1))
-        augmentation_mask = torch.arange(len(self.p_num_transforms)-1).unsqueeze(0).expand(num_samples,len(self.p_num_transforms)-1).to(sampled_num_transforms.device) >= sampled_num_transforms.unsqueeze(1)
+        augmentation_inds = torch.randint(len(self.op_embs),(num_samples,len(self.num_transforms_embs)-1))
+        augmentation_mask = torch.arange(len(self.num_transforms_embs)-1).unsqueeze(0).expand(num_samples,len(self.num_transforms_embs)-1).to(sampled_num_transforms.device) >= sampled_num_transforms.unsqueeze(1)
         augmentation_inds[augmentation_mask] = 0 # index of identity augmentation
         hidden = self.op_embs[augmentation_inds]
         if self.q_residual:
-            hidden += self.q
+            hidden += self.q.unsqueeze(1).expand(-1, hidden.shape[1], -1)
         scale_logits = hidden @ self.scale_embs.t()
         p_scale = self.dist(scale_logits, 2)
         log_p_scale = self.log_dist(scale_logits, 2)
         sampled_scales = torch.multinomial(p_scale.view(-1,p_scale.shape[2]), 1, replacement=True).view(p_scale.shape[:2])
-        #log_ps_of_sampled_scales = torch.gather(log_p_scale,1,sampled_scales)
         flat_log_p_scale = log_p_scale.view(-1,log_p_scale.shape[2])
         log_ps_of_sampled_scales = flat_log_p_scale[torch.arange(len(flat_log_p_scale)),sampled_scales.flatten()].view_as(sampled_scales)
         log_ps_of_sampled_scales[augmentation_mask] = 0.
-        self.logps = self.log_p_num_transforms[sampled_transform_indices] + log_ps_of_sampled_scales.sum(1)
-        #if self.label_smoothing_rate:
-        #    self.logps = (self.log_p_op.mean() * len(sampled_op_idxs) + log_p_scale.mean(1).sum(
-        #        0)) * self.label_smoothing_rate \
-        #                 + self.logps * (1. - self.label_smoothing_rate)
+        self.logps = self.log_p_num_transforms[torch.arange(len(self.log_p_num_transforms)),sampled_transform_indices] + log_ps_of_sampled_scales.sum(1)
         return augmentation_inds.cpu(), sampled_scales.cpu()
 
 
@@ -343,7 +353,7 @@ class LearnedRandAugmentPreprocessor(ImagePreprocessor):
     def __init__(self, dataset_info, hidden_dimension, optimizer_creator, bs, val_bs, entropy_alpha, scale_entropy_alpha=0.,
                  importance_sampling=False, cutout=0, normalize_reward=True, model_for_online_tests=None,
                  D_out=10, q_zero_init=True, q_residual=False, scale_embs_zero_init=False, label_smoothing_rate=0.,
-                 possible_num_sequential_transforms=[1,2,3,4], sigmax_dist=False,
+                 possible_num_sequential_transforms=[1,2,3,4], sigmax_dist=False, use_images_for_sampler=False,
                  **kwargs):
         super().__init__(**kwargs)
         print('using learned preprocessor')
@@ -357,7 +367,7 @@ class LearnedRandAugmentPreprocessor(ImagePreprocessor):
 
         self.augmentation_sampler = RandAugmentationSampler(hidden_dimension, self.num_transforms, self.num_scales, torch.tensor(possible_num_sequential_transforms),
                                                         q_residual, q_zero_init, scale_embs_zero_init,
-                                                        label_smoothing_rate, (sigmax, log_sigmax) if sigmax_dist else (torch.softmax, torch.log_softmax)).to(self.device)
+                                                        label_smoothing_rate, (sigmax, log_sigmax) if sigmax_dist else (torch.softmax, torch.log_softmax),use_images_for_sampler).to(self.device)
         self.agumentation_sampler_copies = []
         self.bs = bs
         self.val_bs = val_bs
@@ -373,7 +383,7 @@ class LearnedRandAugmentPreprocessor(ImagePreprocessor):
         if self.training:
             aug_sampler = deepcopy(self.augmentation_sampler)
             self.agumentation_sampler_copies.append(aug_sampler)
-            sampled_op_idxs, sampled_scales = aug_sampler(self.bs, self.model)
+            sampled_op_idxs, sampled_scales = aug_sampler(imgs)
             activated_transforms_for_batch = [[(i,s) for i,s in zip(i_s,s_s)] for i_s,s_s in zip(sampled_op_idxs,sampled_scales)] + [[(0,1.)] for _ in range(self.val_bs)]
             self.write_summary(aug_sampler, step)
         else:
@@ -410,8 +420,7 @@ class LearnedRandAugmentPreprocessor(ImagePreprocessor):
         aug_sampler.zero_grad()
         loss = -aug_sampler.logps @ weights.detach() / float(len(weights))
         if self.entropy_alpha:
-            neg_entropy = aug_sampler.p_num_transforms @ (
-                        aug_sampler.log_p_num_transforms * (aug_sampler.p_num_transforms != 0.))  # here we could have logp = -inf and p = 0.
+            neg_entropy = torch.einsum('bt,bt->b',aug_sampler.p_num_transforms,(aug_sampler.log_p_num_transforms * (aug_sampler.p_num_transforms != 0.))).mean()
             loss += self.entropy_alpha * neg_entropy
         if self.scale_entropy_alpha:
             hidden = aug_sampler.op_embs
@@ -438,14 +447,15 @@ class LearnedRandAugmentPreprocessor(ImagePreprocessor):
     def write_summary(self, aug_sampler, step):
         if step % 10 == 0 and self.summary_writer is not None and self.training:
             with torch.no_grad():
-                for i,p in enumerate(aug_sampler.p_num_transforms):
+                for i,p in enumerate(aug_sampler.p_num_transforms.mean(0)):
                     self.summary_writer.add_scalar(f'NumAugs/{i}', p, step)
-
-                hidden = aug_sampler.op_embs
+                augmentation_inds = torch.arange(len(aug_sampler.op_embs)).unsqueeze(0).expand(len(aug_sampler.q),-1)
+                hidden = aug_sampler.op_embs[augmentation_inds]
                 if aug_sampler.q_residual:
-                    hidden += aug_sampler.compute_q()
+                    hidden += aug_sampler.q.unsqueeze(1).expand(-1,hidden.shape[1],-1)
                 scale_logits = hidden @ aug_sampler.scale_embs.t()
-                p_scale = aug_sampler.dist(scale_logits, 1)
+                p_scale = aug_sampler.dist(scale_logits, 2).mean(0)
+
                 for aug_idx, scale_dist in enumerate(p_scale):
                     self.summary_writer.add_scalar(f'AvgScale/aug_{aug_idx}', scale_dist @ torch.arange(scale_dist.shape[-1],dtype=scale_dist.dtype,device=scale_dist.device), step)
                 for aug_idx, scale_dist in enumerate(p_scale):
