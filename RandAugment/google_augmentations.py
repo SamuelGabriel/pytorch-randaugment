@@ -131,7 +131,7 @@ rotate = TransformT('Rotate', _rotate_impl)
 def _posterize_impl(pil_img, level):
   """Applies PIL Posterize to `pil_img`."""
   level = int_parameter(level, min_max_vals.posterize.max - min_max_vals.posterize.min)
-  return ImageOps.posterize(pil_img, min_max_vals.posterize.min + level)
+  return ImageOps.posterize(pil_img, min_max_vals.posterize.max - level)
 
 
 posterize = TransformT('Posterize', _posterize_impl)
