@@ -119,7 +119,7 @@ class CheckpointFunctionForSampler(torch.autograd.Function):
         return (None, None) + (None,)
 
 def log_sigmax(logits, d):
-    return - torch.log(1.+torch.exp(-logits)) - torch.log(torch.sigmoid(logits).sum(d, keepdim=True))
+    return torch.nn.functional.logsigmoid(logits) - torch.log(torch.sigmoid(logits).sum(d, keepdim=True))
 
 def sigmax(logits, d):
     sigs = torch.sigmoid(logits)
