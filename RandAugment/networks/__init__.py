@@ -54,9 +54,9 @@ def get_model(conf, bs, val_bs, optimizer_creator_factory, num_class=10, writer=
     elif name == 'resnet200':
         model = ResNet(dataset='imagenet', depth=200, num_classes=num_class, bottleneck=True)
     elif name == 'wresnet40_2':
-        model = WideResNet(40, 2, dropout_rate=0.0, num_classes=num_class, adaptive_dropouter_creator=ad_creators[0],adaptive_conv_dropouter_creator=ad_creators[1])
+        model = WideResNet(40, 2, dropout_rate=conf.get('dropout',0.0), num_classes=num_class, adaptive_dropouter_creator=ad_creators[0],adaptive_conv_dropouter_creator=ad_creators[1], groupnorm=conf.get('groupnorm', False), examplewise_bn=conf.get('examplewise_bn', False), virtual_bn=conf.get('virtual_bn', False))
     elif name == 'wresnet28_10':
-        model = WideResNet(28, 10, dropout_rate=0.0, num_classes=num_class, adaptive_dropouter_creator=ad_creators[0],adaptive_conv_dropouter_creator=ad_creators[1])
+        model = WideResNet(28, 10, dropout_rate=conf.get('dropout',0.0), num_classes=num_class, adaptive_dropouter_creator=ad_creators[0],adaptive_conv_dropouter_creator=ad_creators[1], groupnorm=conf.get('groupnorm',False), examplewise_bn=conf.get('examplewise_bn', False), virtual_bn=conf.get('virtual_bn', False))
     elif name == 'miniconvnet':
         model = SeqConvNet(num_class,adaptive_dropout_creator=ad_creators[0],batch_norm=False)
     elif name == 'mlp':
