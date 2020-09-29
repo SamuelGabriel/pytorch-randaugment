@@ -23,7 +23,7 @@ from RandAugment.data import get_dataloaders
 from RandAugment.lr_scheduler import adjust_learning_rate_resnet
 from RandAugment.metrics import accuracy, Accumulator
 from RandAugment.networks import get_model, num_class
-from RandAugment.preprocessors import LearnedPreprocessorRandaugmentSpace, StandardCIFARPreprocessor, LearnedRandAugmentPreprocessor
+from RandAugment.preprocessors import LearnedPreprocessorRandaugmentSpace, StandardCIFARPreprocessor, LearnedRandAugmentPreprocessor, LearnedPreprocessorEnsemble
 from warmup_scheduler import GradualWarmupScheduler
 from RandAugment import google_augmentations
 
@@ -264,30 +264,34 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
     if 'preprocessor' in C.get():
         preprocessor_flags = C.get()['preprocessor']
         preprocessor_type = C.get()['preprocessor']['type']
-        if preprocessor_type in ('learned_randaugmentspace','learned_random_randaugmentspace'):
+        if preprocessor_type in ('learned_randaugmentspace','learned_random_randaugmentspace','learned_random_randaugmentspace_ensemble'):
             importance_sampling = False
             assert not preprocessor_flags.get('online_tests_on_model')
             extra_kwargs = {}
             if 'possible_num_sequential_transforms' in preprocessor_flags:
                 extra_kwargs['possible_num_sequential_transforms'] = preprocessor_flags['possible_num_sequential_transforms']
 
-            image_preprocessor = (LearnedPreprocessorRandaugmentSpace if preprocessor_type == 'learned_randaugmentspace' else LearnedRandAugmentPreprocessor) (dataset_info,
-                                                                     preprocessor_flags['hidden_dim'],
-                                                                     get_meta_optimizer_factory(),
-                                                                     C.get()['batch'],val_bs,
-                                                                     preprocessor_flags['entropy_alpha'],
-                                                                     scale_entropy_alpha=preprocessor_flags['scale_entropy_alpha'],
-                                                                     cutout=C.get().get('cutout', 0),
-                                                                     importance_sampling=importance_sampling,
-                                                                     normalize_reward=preprocessor_flags.get('normalize_reward',True),
-                                                                     model_for_online_tests=None,
-                                                                     q_zero_init=preprocessor_flags['q_zero_init'],
-                                                                     scale_embs_zero_init=preprocessor_flags.get('scale_embs_zero_init',False),
-                                                                     q_residual=preprocessor_flags.get('q_residual',False),
-                                                                     label_smoothing_rate=preprocessor_flags.get('label_smoothing_rate',0.),
-                                                                     device=torch.device('cuda:0'), sigmax_dist=preprocessor_flags['sigmax_dist'],
-                                                                     use_images_for_sampler=preprocessor_flags['use_images_for_sampler'],
-                                                                     summary_writer=writers[0], **extra_kwargs)
+            preprocessor_classes = {'learned_randaugmentspace': LearnedPreprocessorRandaugmentSpace,
+                                    'learned_random_randaugmentspace': LearnedRandAugmentPreprocessor,
+                                    'learned_random_randaugmentspace_ensemble': LearnedPreprocessorEnsemble}
+
+            image_preprocessor =  preprocessor_classes[preprocessor_type](dataset_info,
+                                                                          preprocessor_flags['hidden_dim'],
+                                                                          get_meta_optimizer_factory(),
+                                                                          C.get()['batch'],val_bs,
+                                                                          entropy_alpha=preprocessor_flags['entropy_alpha'],
+                                                                          scale_entropy_alpha=preprocessor_flags['scale_entropy_alpha'],
+                                                                          cutout=C.get().get('cutout', 0),
+                                                                          importance_sampling=importance_sampling,
+                                                                          normalize_reward=preprocessor_flags.get('normalize_reward',True),
+                                                                          model_for_online_tests=None,
+                                                                          q_zero_init=preprocessor_flags['q_zero_init'],
+                                                                          scale_embs_zero_init=preprocessor_flags.get('scale_embs_zero_init',False),
+                                                                          q_residual=preprocessor_flags.get('q_residual',False),
+                                                                          label_smoothing_rate=preprocessor_flags.get('label_smoothing_rate',0.),
+                                                                          device=torch.device('cuda:0'), sigmax_dist=preprocessor_flags['sigmax_dist'],
+                                                                          use_images_for_sampler=preprocessor_flags['use_images_for_sampler'],
+                                                                          summary_writer=writers[0], **extra_kwargs)
 
         elif preprocessor_type == 'standard_cifar':
             image_preprocessor = StandardCIFARPreprocessor(dataset_info, C.get().get('cutout', 0))

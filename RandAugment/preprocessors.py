@@ -363,7 +363,7 @@ class LearnedRandAugmentPreprocessor(ImagePreprocessor):
                  importance_sampling=False, cutout=0, normalize_reward=True, model_for_online_tests=None,
                  D_out=10, q_zero_init=True, q_residual=False, scale_embs_zero_init=False, label_smoothing_rate=0.,
                  possible_num_sequential_transforms=[1,2,3,4], sigmax_dist=False, use_images_for_sampler=False,
-                 **kwargs):
+                 summary_prefix='', **kwargs):
         super().__init__(**kwargs)
         print('using learned preprocessor')
 
@@ -386,13 +386,15 @@ class LearnedRandAugmentPreprocessor(ImagePreprocessor):
         self.entropy_alpha = entropy_alpha
         self.scale_entropy_alpha = scale_entropy_alpha
         self.importance_sampling = importance_sampling
+        self.summary_prefix = summary_prefix
 
     def forward(self, imgs, step):
+        print('len(imgs), self.bs',len(imgs), self.bs)
         self.t = step
         if self.training:
             aug_sampler = deepcopy(self.augmentation_sampler)
             self.agumentation_sampler_copies.append(aug_sampler)
-            sampled_op_idxs, sampled_scales = aug_sampler(imgs)
+            sampled_op_idxs, sampled_scales = aug_sampler(imgs[:self.bs])
             activated_transforms_for_batch = [[(i,s) for i,s in zip(i_s,s_s)] for i_s,s_s in zip(sampled_op_idxs,sampled_scales)] + [[(0,1.)] for _ in range(self.val_bs)]
             self.write_summary(aug_sampler, step)
         else:
@@ -417,9 +419,9 @@ class LearnedRandAugmentPreprocessor(ImagePreprocessor):
         assert len(self.agumentation_sampler_copies) <= 2
         aug_sampler = self.agumentation_sampler_copies.pop(0)  # pops the oldest state first (queue-style)
         if self.t % 100 == 0 and self.summary_writer is not None and self.training:
-            self.summary_writer.add_scalar(f'Alignment/AverageAlignment', rewards.mean(), self.t)
-            self.summary_writer.add_scalar(f'Alignment/MaxAlignment', rewards.max(), self.t)
-            self.summary_writer.add_scalar(f'Alignment/MinAlignment', rewards.min(), self.t)
+            self.summary_writer.add_scalar(f'{self.summary_prefix}Alignment/AverageAlignment', rewards.mean(), self.t)
+            self.summary_writer.add_scalar(f'{self.summary_prefix}Alignment/MaxAlignment', rewards.max(), self.t)
+            self.summary_writer.add_scalar(f'{self.summary_prefix}Alignment/MinAlignment', rewards.min(), self.t)
 
         with torch.no_grad():
             if self.importance_sampling:
@@ -455,7 +457,7 @@ class LearnedRandAugmentPreprocessor(ImagePreprocessor):
         if step % 100 == 10 and self.summary_writer is not None and self.training:
             with torch.no_grad():
                 for i,p in enumerate(aug_sampler.p_num_transforms.mean(0)):
-                    self.summary_writer.add_scalar(f'NumAugs/{i}', p, step)
+                    self.summary_writer.add_scalar(f'{self.summary_prefix}NumAugs/{i}', p, step)
                 augmentation_inds = torch.arange(len(aug_sampler.op_embs)).unsqueeze(0).expand(len(aug_sampler.q),-1)
                 if aug_sampler.use_images:
                     hidden = aug_sampler.q
@@ -468,7 +470,48 @@ class LearnedRandAugmentPreprocessor(ImagePreprocessor):
                 p_scale = aug_sampler.dist(scale_logits, 2).mean(0)
 
                 for aug_idx, scale_dist in enumerate(p_scale):
-                    self.summary_writer.add_scalar(f'AvgScale/aug_{aug_idx}', scale_dist @ torch.arange(scale_dist.shape[-1],dtype=scale_dist.dtype,device=scale_dist.device), step)
+                    self.summary_writer.add_scalar(f'{self.summary_prefix}AvgScale/aug_{aug_idx}', scale_dist @ torch.arange(scale_dist.shape[-1],dtype=scale_dist.dtype,device=scale_dist.device), step)
                 for aug_idx, scale_dist in enumerate(p_scale):
-                    self.summary_writer.add_scalar(f'MaxScale/aug_{aug_idx}', torch.argmax(scale_dist), step)
+                    self.summary_writer.add_scalar(f'{self.summary_prefix}MaxScale/aug_{aug_idx}', torch.argmax(scale_dist), step)
+
+class LearnedPreprocessorEnsemble(ImagePreprocessor):
+    def __init__(self, dataset_info, hidden_dimension, optimizer_creator, bs, val_bs, *args, **kwargs):
+        super().__init__()
+        self.bs = bs
+        self.val_bs = val_bs
+        self.preprocessors = nn.ModuleList()
+        num_preprocessors = 8
+        assert bs % num_preprocessors == 0
+        for i in range(num_preprocessors):
+            self.preprocessors.append(
+                LearnedRandAugmentPreprocessor(dataset_info,hidden_dimension,optimizer_creator,bs//num_preprocessors,
+                                               val_bs if i == num_preprocessors - 1 else 0,
+                                               *args, summary_prefix=f'Prepr{i}', **kwargs)
+            )
+
+    def forward(self, imgs, step):
+        offset = 0
+        out_imgs = []
+        for i, prepr in enumerate(self.preprocessors):
+            if i == len(self.preprocessors) - 1:
+                end = self.bs + self.val_bs
+            else:
+                end = offset + self.bs // len(self.preprocessors)
+            out_imgs.append(prepr(imgs[offset:end], step))
+            offset = end
+        return torch.cat(out_imgs, dim=0)
+
+    def step(self, rewards):
+        offset = 0
+        for prepr in self.preprocessors:
+            end = offset + self.bs // len(self.preprocessors)
+            prepr.step(rewards[offset:end])
+            offset = end
+        assert end == len(rewards)
+
+    def reset_state(self):
+        for prepr in self.preprocessors:
+            prepr.reset_state()
+
+
 
