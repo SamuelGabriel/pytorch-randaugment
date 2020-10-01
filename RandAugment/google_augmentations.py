@@ -18,10 +18,10 @@ class MinMax:
 @dataclass
 class MinMaxVals:
     shear: MinMax = MinMax(.0, .3)
-    translate: MinMax = MinMax(0, 10)
+    translate: MinMax = MinMax(0, 10) # different from uniaug: MinMax(0,14.4)
     rotate: MinMax = MinMax(0, 30)
     solarize: MinMax = MinMax(0, 256)
-    posterize: MinMax = MinMax(0, 4)
+    posterize: MinMax = MinMax(0, 4) # different from uniaug: MinMax(4,8)
     enhancer: MinMax = MinMax(.1,1.9)
     cutout: MinMax = MinMax(.0,.2)
 
@@ -369,6 +369,11 @@ def set_search_space(search_space):
             enhancer=MinMax(.01,2.),
             cutout=MinMax(.0,.6),
         )
+    elif ('uniaug' in search_space) or ('randaug' in search_space):
+        min_max_vals = MinMaxVals(
+            posterize=MinMax(4,8),
+            translate=MinMax(0, 14.4)
+        )
     elif 'fix' in search_space:
         min_max_vals = MinMaxVals(
             posterize=MinMax(4,8)
@@ -396,6 +401,25 @@ def set_search_space(search_space):
             opt_flip_lr,
             opt_flip_ud,
             cutout
+        ]
+    elif 'uniaug' in search_space:
+        ALL_TRANSFORMS = [
+            identity,
+            shear_x,
+            shear_y,
+            translate_x,
+            translate_y,
+            rotate,
+            auto_contrast,
+            invert, # only uniaug
+            equalize,
+            solarize,
+            posterize,
+            contrast,
+            color,
+            brightness,
+            sharpness,
+            cutout # only uniaug
         ]
     else:
         print("Using standard aug ops.")

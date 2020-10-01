@@ -497,7 +497,10 @@ class LearnedPreprocessorEnsemble(ImagePreprocessor):
                 end = self.bs + self.val_bs
             else:
                 end = offset + self.bs // len(self.preprocessors)
-            out_imgs.append(prepr(imgs[offset:end], step))
+            img_subbatch = imgs[offset:end]
+            if not img_subbatch and not self.training:
+                break
+            out_imgs.append(prepr(img_subbatch, step))
             offset = end
         return torch.cat(out_imgs, dim=0)
 

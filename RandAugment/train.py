@@ -192,7 +192,7 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
         logger.warning('tag not provided, no tensorboard log.')
     else:
         from tensorboardX import SummaryWriter
-    writers = [SummaryWriter(log_dir='./logs/%s/%s' % (tag, x)) for x in ['train', 'valid', 'test']]
+    writers = [SummaryWriter(log_dir='./logs2/%s/%s' % (tag, x)) for x in ['train', 'valid', 'test']]
 
     def get_meta_optimizer_factory():
         meta_flags = C.get().get('meta_opt',{})
