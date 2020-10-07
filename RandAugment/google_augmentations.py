@@ -278,7 +278,7 @@ sharpness = TransformT('Sharpness', _enhancer_impl(ImageEnhance.Sharpness))
 
 def CutoutDefault(img, v):  # [0, 60] => percentage: [0, 0.2]
     # assert 0 <= v <= 20
-    if v < 0:
+    if v <= 0:
         return img
     w, h = img.size
     x0 = np.random.uniform(w)
@@ -369,7 +369,7 @@ def set_search_space(search_space):
             enhancer=MinMax(.01,2.),
             cutout=MinMax(.0,.6),
         )
-    elif ('uniaug' in search_space) or ('randaug' in search_space):
+    elif ('uniaug' in search_space) or ('randaug' in search_space) or ('opt_ua' in search_space):
         min_max_vals = MinMaxVals(
             posterize=MinMax(4,8),
             translate=MinMax(0, 14.4)
@@ -420,6 +420,25 @@ def set_search_space(search_space):
             brightness,
             sharpness,
             cutout # only uniaug
+        ]
+    elif 'opt_ua' in search_space:
+        ALL_TRANSFORMS = [
+            identity,
+            shear_x,
+            shear_y,
+            translate_x,
+            translate_y,
+            rotate,
+            opt_auto_contrast,
+            opt_invert,  # only uniaug
+            opt_equalize,
+            solarize,
+            posterize,
+            contrast,
+            color,
+            brightness,
+            sharpness,
+            cutout  # only uniaug
         ]
     else:
         print("Using standard aug ops.")
