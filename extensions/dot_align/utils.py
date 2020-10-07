@@ -1,4 +1,10 @@
 class StatehandlingMeta(object):
+    def add_callback(self,state,callback):
+        if 'callbacks' in state:
+            state['callbacks'].append(callback)
+        else:
+            state['callbacks'] = [callback]
+
     def handle_state(self,state,field_name,module,*params) -> tuple:
         if not self.align_with_next:
             return params + params

@@ -5,7 +5,7 @@ from torch.nn import functional as F
 from backpack.extensions.backprop_extension import BackpropExtension
 from .conv2d_derivatives import Conv2DDerivatives
 
-from . import batchnorm1d, conv2d, linear, utils
+from . import batchnorm1d, conv2d, linear, utils, parallel_conv2d, parallel_linear
 
 from opt_einsum import contract
 
@@ -22,7 +22,7 @@ class ComputeAlignment():
             self.grad_alignment = lambda g0,g0_matrix,g_matrix: torch.cosine_similarity(g_matrix,g0.unsqueeze(0),dim=1)
         else:
             self.grad_alignment = lambda g0,g0_matrix,g_matrix: g_matrix @ g0
-    def __call__(self, batch_grads, comparison_batch_grads):
+    def __call__(self, batch_grads, comparison_batch_grads, curr_grad=None):
         batch_grad_vecs = batch_grads.flatten(start_dim=1)
         comparison_grad_vecs = comparison_batch_grads.flatten(start_dim=1)
         if self.val_bs:
@@ -31,16 +31,19 @@ class ComputeAlignment():
             batch_grad_vecs = batch_grad_vecs[:self.bs-self.val_bs]
         else:
             comparison_this_batch_grad_vecs = batch_grad_vecs
-        if self.normalized_summation:
-            comparison_grad_vec = torch.sum(comparison_grad_vecs/torch.norm(comparison_grad_vecs,dim=1).unsqueeze_(1),dim=0)
+        if not self.val_bs and not self.normalized_summation and not self.compare_to_difference and curr_grad is not None:
+            comparison_grad_vec = curr_grad
         else:
-            comparison_grad_vec = comparison_grad_vecs.sum(dim=0)
-        if self.compare_to_difference:
             if self.normalized_summation:
-                c = torch.sum(comparison_this_batch_grad_vecs/torch.norm(comparison_this_batch_grad_vecs,dim=1).unsqueeze_(1),dim=0)
+                comparison_grad_vec = torch.sum(comparison_grad_vecs/torch.norm(comparison_grad_vecs,dim=1).unsqueeze_(1),dim=0)
             else:
-                c = comparison_this_batch_grad_vecs.sum(dim=0)
-            comparison_grad_vec = comparison_grad_vec - c
+                comparison_grad_vec = comparison_grad_vecs.sum(dim=0)
+            if self.compare_to_difference:
+                if self.normalized_summation:
+                    c = torch.sum(comparison_this_batch_grad_vecs/torch.norm(comparison_this_batch_grad_vecs,dim=1).unsqueeze_(1),dim=0)
+                else:
+                    c = comparison_this_batch_grad_vecs.sum(dim=0)
+                comparison_grad_vec = comparison_grad_vec - c
         ga = self.grad_alignment(comparison_grad_vec,comparison_grad_vecs,batch_grad_vecs)
         return ga
 
@@ -69,7 +72,7 @@ class ComputeAlignmentVec():
                 return dot_prod/(squared_grad_norm*squared_grad_norms).sqrt()
         return dot_prod
 
-    def __call__(self, X, dE_dY, comparison_X, comparison_dE_dY):
+    def __call__(self, X, dE_dY, comparison_X, comparison_dE_dY, curr_grad=None):
         if self.val_bs:
             comparison_X = comparison_X[self.bs-self.val_bs:]
             comparison_dE_dY = comparison_dE_dY[self.bs-self.val_bs:]
@@ -80,16 +83,18 @@ class ComputeAlignmentVec():
         else:
             comparison_this_X = X
             comparison_this_dE_dY = dE_dY
-
-        if self.normalized_summation:
-            squared_grad_norms = contract("nml,nkl,nmi,nki->n", comparison_dE_dY, comparison_X, comparison_dE_dY, comparison_X)
-            comparison_X = comparison_X/squared_grad_norms.sqrt().unsqueeze_(1).unsqueeze_(1)
-        comparison_grad = contract("noi,nai->oa", comparison_dE_dY, comparison_X)
-        if self.compare_to_difference:
+        if not self.val_bs and not self.normalized_summation and not self.compare_to_difference and curr_grad is not None:
+            comparison_grad = curr_grad
+        else:
             if self.normalized_summation:
-                squared_grad_norms = contract("nml,nkl,nmi,nki->n", comparison_this_dE_dY, comparison_this_X, comparison_this_dE_dY, comparison_this_X)
-                comparison_this_X = comparison_this_X/squared_grad_norms.sqrt().unsqueeze_(1).unsqueeze_(1)
-            comparison_grad = comparison_grad - contract("noi,nai->oa", comparison_this_dE_dY, comparison_this_X)
+                squared_grad_norms = contract("nml,nkl,nmi,nki->n", comparison_dE_dY, comparison_X, comparison_dE_dY, comparison_X)
+                comparison_X = comparison_X/squared_grad_norms.sqrt().unsqueeze_(1).unsqueeze_(1)
+            comparison_grad = contract("noi,nai->oa", comparison_dE_dY, comparison_X)
+            if self.compare_to_difference:
+                if self.normalized_summation:
+                    squared_grad_norms = contract("nml,nkl,nmi,nki->n", comparison_this_dE_dY, comparison_this_X, comparison_this_dE_dY, comparison_this_X)
+                    comparison_this_X = comparison_this_X/squared_grad_norms.sqrt().unsqueeze_(1).unsqueeze_(1)
+                comparison_grad = comparison_grad - contract("noi,nai->oa", comparison_this_dE_dY, comparison_this_X)
         #print('comp comp grad', comparison_grad.numel(), comparison_grad.flatten())
 
         ga = self.grad_alignment(comparison_grad, X, dE_dY)
@@ -192,6 +197,50 @@ class DotAlignment(BackpropExtension):
             module_exts={
                 Linear: linear.DotAlignLinear(alignment_function,alignment_function_vec,state,align_with_next='2' in align_with),
                 Conv2d: conv2d.DotAlignConv2d(alignment_function,alignment_function_vec,None if use_slow_version else alignment_function_conv(),state,align_with_next='2' in align_with),
+                #BatchNorm1d: batchnorm1d.DotAlignBatchNorm1d(alignment_function),
+            },
+        )
+
+class DistributedDotAlignment(BackpropExtension):
+    """Alignment of individual gradients for each sample in a minibatch.
+
+    Stores the output in ``grad_batch`` as a ``[N x ...]`` tensor,
+    where ``N`` batch size and ``...`` is the shape of the gradient.
+
+    Note: beware of scaling issue
+        The `individual gradients` depend on the scaling of the overall function.
+        Let ``fᵢ`` be the loss of the ``i`` th sample, with gradient ``gᵢ``.
+        ``BatchGrad`` will return
+
+        - ``[g₁, …, gₙ]`` if the loss is a sum, ``∑ᵢ₌₁ⁿ fᵢ``,
+        - ``[¹/ₙ g₁, …, ¹/ₙ gₙ]`` if the loss is a mean, ``¹/ₙ ∑ᵢ₌₁ⁿ fᵢ``.
+
+    The concept of individual gradients is only meaningful if the
+    objective is a sum of independent functions (no batchnorm).
+
+    """
+
+    @utils.run_once
+    def warn(self,val_bs):
+        print("Warn: BatchNorm bias/weight are not compared.")
+        if val_bs:
+            print("Oooh! Validation batch is not tested!")
+
+    def __init__(self,bs,val_bs,state,cossim,align_with='1'):
+        assert align_with in ('1','2')
+        self.warn(val_bs)
+        remove_me_summation = False
+        normalized_summation = False
+        align_with_diff = False
+        alignment_function = ComputeAlignment(bs,val_bs,remove_me_summation,normalized_summation,cossim,align_with_diff)
+        alignment_function_vec = ComputeAlignmentVec(bs,val_bs,remove_me_summation,normalized_summation,cossim,align_with_diff)
+        alignment_function_conv = ComputeAlignmentConv(bs,val_bs,remove_me_summation,normalized_summation,cossim,align_with_diff)
+        super().__init__(
+            savefield="grad_alignments",
+            fail_mode="WARNING",
+            module_exts={
+                Linear: parallel_linear.DotAlignLinear(alignment_function,alignment_function_vec,state,align_with_next='2' in align_with),
+                Conv2d: parallel_conv2d.DotAlignConv2d(alignment_function,alignment_function_vec,alignment_function_conv,state,align_with_next='2' in align_with),
                 #BatchNorm1d: batchnorm1d.DotAlignBatchNorm1d(alignment_function),
             },
         )
