@@ -78,8 +78,8 @@ def get_model(conf, bs, val_bs, optimizer_creator_factory, num_class=10, writer=
     else:
         raise NameError('no model named, %s' % name)
 
-    model = model.cuda()
-    model = DataParallel(model)
+    #model = model.cuda()
+    #model = DataParallel(model)
     cudnn.benchmark = True
     return model
 

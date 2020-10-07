@@ -8,6 +8,7 @@ from RandAugment.networks.convnet import SeqConvNet
 from RandAugment.common import sigmax, log_sigmax
 
 from copy import deepcopy
+import random
 
 class Preprocessor(nn.Module):
     def __init__(self, device='cpu:0', summary_writer=None):
@@ -160,10 +161,10 @@ class LearnedPreprocessorRandaugmentSpace(ImagePreprocessor):
     def __init__(self, dataset_info, hidden_dimension, optimizer_creator, bs, val_bs, entropy_alpha, scale_entropy_alpha=0.,
                  importance_sampling=False, cutout=0, normalize_reward=True, model_for_online_tests=None,
                  D_out=10, q_zero_init=True, q_residual=False, scale_embs_zero_init=False, label_smoothing_rate=0.,
-                 sigmax_dist=False, use_images_for_sampler=False, **kwargs):
+                 sigmax_dist=False, use_images_for_sampler=False, uniaug_val=False,  old_preprocessor_val=False, current_preprocessor_val=False, **kwargs):
         super().__init__(**kwargs)
         print('using learned preprocessor')
-        assert not use_images_for_sampler
+        assert not use_images_for_sampler and not uniaug_val and not old_preprocessor_val and not current_preprocessor_val
 
         img_dims = dataset_info['img_dims']
         self.num_transforms = google_augmentations.num_augmentations()
@@ -188,7 +189,8 @@ class LearnedPreprocessorRandaugmentSpace(ImagePreprocessor):
         self.bs = bs
         self.val_bs = val_bs
 
-    def forward(self, imgs, step):
+    def forward(self, imgs, step, validation_step=False):
+        assert not validation_step
         self.t = step
         if self.training:
             aug_sampler = deepcopy(self.augmentation_sampler)
@@ -362,7 +364,7 @@ class LearnedRandAugmentPreprocessor(ImagePreprocessor):
     def __init__(self, dataset_info, hidden_dimension, optimizer_creator, bs, val_bs, entropy_alpha, scale_entropy_alpha=0.,
                  importance_sampling=False, cutout=0, normalize_reward=True, model_for_online_tests=None,
                  D_out=10, q_zero_init=True, q_residual=False, scale_embs_zero_init=False, label_smoothing_rate=0.,
-                 possible_num_sequential_transforms=[1,2,3,4], sigmax_dist=False, use_images_for_sampler=False,
+                 possible_num_sequential_transforms=[1,2,3,4], sigmax_dist=False, use_images_for_sampler=False, uniaug_val=False, old_preprocessor_val=False, current_preprocessor_val=False,
                  summary_prefix='', **kwargs):
         super().__init__(**kwargs)
         print('using learned preprocessor')
@@ -386,17 +388,53 @@ class LearnedRandAugmentPreprocessor(ImagePreprocessor):
         self.entropy_alpha = entropy_alpha
         self.scale_entropy_alpha = scale_entropy_alpha
         self.importance_sampling = importance_sampling
+        self.possible_num_sequential_transforms = possible_num_sequential_transforms
+        self.uniaug_val = uniaug_val
+        self.old_preprocessor_val = old_preprocessor_val
+        if self.old_preprocessor_val:
+            self.old_preprossors = [deepcopy(self.augmentation_sampler)]
+            self.num_model_updates = 0
+        self.current_preprocessor_val = current_preprocessor_val
         self.summary_prefix = summary_prefix
 
-    def forward(self, imgs, step):
-        print('len(imgs), self.bs',len(imgs), self.bs)
+    def val_augmentations(self, imgs):
+        assert sum([self.uniaug_val, self.old_preprocessor_val, self.current_preprocessor_val]) <= 1
+
+        if not imgs:
+            return []
+
+        if self.uniaug_val:
+            def uni_aug_augmentations():
+                num_transf = self.possible_num_sequential_transforms[random.randint(0,len(self.possible_num_sequential_transforms)-1)]
+                transforms = []
+                for t_i in range(num_transf):
+                    transforms.append((random.randint(0,self.num_transforms-1), random.randint(0,google_augmentations.PARAMETER_MAX)))
+                return transforms
+            return [uni_aug_augmentations() for i in imgs]
+        elif self.current_preprocessor_val:
+            with torch.no_grad():
+                sampled_op_idxs, sampled_scales = self.augmentation_sampler(imgs)
+                return [[(i,s) for i,s in zip(i_s,s_s)] for i_s,s_s in zip(sampled_op_idxs,sampled_scales)]
+        elif self.old_preprocessor_val:
+            with torch.no_grad():
+                sampled_op_idxs, sampled_scales = self.old_preprossors[random.randint(0,len(self.old_preprossors)-1)](imgs)
+                return [[(i, s) for i, s in zip(i_s, s_s)] for i_s, s_s in zip(sampled_op_idxs, sampled_scales)]
+        else:
+            return [(0,1.) for i in imgs]
+
+
+    def forward(self, imgs, step, validation_step=False):
         self.t = step
         if self.training:
-            aug_sampler = deepcopy(self.augmentation_sampler)
-            self.agumentation_sampler_copies.append(aug_sampler)
-            sampled_op_idxs, sampled_scales = aug_sampler(imgs[:self.bs])
-            activated_transforms_for_batch = [[(i,s) for i,s in zip(i_s,s_s)] for i_s,s_s in zip(sampled_op_idxs,sampled_scales)] + [[(0,1.)] for _ in range(self.val_bs)]
-            self.write_summary(aug_sampler, step)
+            if validation_step:
+                assert not self.val_bs
+                activated_transforms_for_batch = self.val_augmentations(imgs) # [self.val_augmentations() for _ in range(self.bs)]
+            else:
+                aug_sampler = deepcopy(self.augmentation_sampler)
+                self.agumentation_sampler_copies.append(aug_sampler)
+                sampled_op_idxs, sampled_scales = aug_sampler(imgs[:self.bs])
+                activated_transforms_for_batch = [[(i,s) for i,s in zip(i_s,s_s)] for i_s,s_s in zip(sampled_op_idxs,sampled_scales)] + self.val_augmentations(imgs[self.bs:]) # [self.val_augmentations() for _ in range(self.val_bs)]
+                self.write_summary(aug_sampler, step)
         else:
             activated_transforms_for_batch = [[(0, 1.)] for i in imgs]  # do not apply any augmentation when evaluating
         t_imgs = []
@@ -405,7 +443,7 @@ class LearnedRandAugmentPreprocessor(ImagePreprocessor):
             for op, scale in augs:
                 img = google_augmentations.apply_augmentation(op, scale, img)
             t_imgs.append(img)
-        if self.importance_sampling and self.training:
+        if self.importance_sampling and self.training and not validation_step:
             w = 1. / (self.num_transforms * self.num_scales * torch.exp(aug_sampler.logps.detach()))
             return self.standard_cifar_preprocessor(t_imgs, step), w * (len(w) / torch.sum(w))
         return self.standard_cifar_preprocessor(t_imgs, step)
@@ -448,6 +486,17 @@ class LearnedRandAugmentPreprocessor(ImagePreprocessor):
         self.augmentation_sampler.add_grad_of_copy(aug_sampler)
         self.optimizer.step()
         del aug_sampler
+        if self.old_preprocessor_val:
+            self.num_model_updates += 1
+            log2_num_model_updates = self.num_model_updates.bit_length() - 1
+            log2_max_num_saved_augmenters = 8 # 8 is log2(256)
+            last_2power_of_256 = 0 if log2_num_model_updates < log2_max_num_saved_augmenters else 2**log2_num_model_updates
+            if self.num_model_updates == last_2power_of_256:
+                self.old_preprossors = [p for i, p in enumerate(self.old_preprossors) if i % 2 == 0]
+                assert len(self.old_preprossors) == 2**(log2_max_num_saved_augmenters-1), f'{len(self.old_preprossors)}'
+            offset = 2**(max(log2_num_model_updates - log2_max_num_saved_augmenters + 1, 0))
+            if self.num_model_updates % offset == 0:
+                self.old_preprossors.append(deepcopy(self.augmentation_sampler))
 
     def reset_state(self):
         del self.agumentation_sampler_copies
@@ -489,7 +538,7 @@ class LearnedPreprocessorEnsemble(ImagePreprocessor):
                                                *args, summary_prefix=f'Prepr{i}', **kwargs)
             )
 
-    def forward(self, imgs, step):
+    def forward(self, imgs, step, validation_step=False):
         offset = 0
         out_imgs = []
         for i, prepr in enumerate(self.preprocessors):
@@ -500,7 +549,7 @@ class LearnedPreprocessorEnsemble(ImagePreprocessor):
             img_subbatch = imgs[offset:end]
             if not img_subbatch and not self.training:
                 break
-            out_imgs.append(prepr(img_subbatch, step))
+            out_imgs.append(prepr(img_subbatch, step, validation_step))
             offset = end
         return torch.cat(out_imgs, dim=0)
 

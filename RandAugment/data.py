@@ -5,6 +5,7 @@ import torchvision
 from PIL import Image
 
 from torch.utils.data import SubsetRandomSampler, Sampler
+from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data.dataset import ConcatDataset
 from torchvision.transforms import transforms
 from sklearn.model_selection import StratifiedShuffleSplit
@@ -31,7 +32,7 @@ _IMAGENET_PCA = {
 _CIFAR_MEAN, _CIFAR_STD = (0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)
 
 
-def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_optimizer_factory=None, summary_writer=None):
+def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_optimizer_factory=None, distributed=False, summary_writer=None):
     dataset_info = {}
     if 'cifar' in dataset or 'svhn' in dataset:
         transform_train = transforms.Compose([
@@ -125,20 +126,27 @@ def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_
     else:
         valid_sampler = SubsetSampler([])
 
+    if distributed:
+        assert split == 0.0, "Split not supported for distributed training."
+        train_sampler = DistributedSampler(total_trainset)
+        test_sampler = DistributedSampler(testset, shuffle=False)
+    else:
+        test_sampler = None
+
     if 'adaptive_trainloader' in C.get():
         val_bs = C.get().get('val_batch',0)
         trainloader = AdaptiveLoaderByLabel(total_trainset, get_meta_optimizer_factory(), batch-val_bs, val_bs, summary_writer=summary_writer)
     else:
         trainloader = torch.utils.data.DataLoader(
-            total_trainset, batch_size=batch, shuffle=True if train_sampler is None else False, num_workers=32, pin_memory=True,
+            total_trainset, batch_size=batch, shuffle=train_sampler is None, num_workers=1 if distributed else 32, pin_memory=True,
             sampler=train_sampler, drop_last=True)
     validloader = torch.utils.data.DataLoader(
-        total_trainset, batch_size=batch, shuffle=False, num_workers=16, pin_memory=True,
+        total_trainset, batch_size=batch, shuffle=False, num_workers=1 if distributed else 16, pin_memory=True,
         sampler=valid_sampler, drop_last=False)
 
     testloader = torch.utils.data.DataLoader(
-        testset, batch_size=batch, shuffle=False, num_workers=32, pin_memory=True,
-        drop_last=False
+        testset, batch_size=batch, shuffle=False, num_workers=1 if distributed else 32, pin_memory=True,
+        drop_last=False, sampler=test_sampler
     )
     return train_sampler, trainloader, validloader, testloader, dataset_info
 

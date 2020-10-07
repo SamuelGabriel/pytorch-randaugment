@@ -6,17 +6,24 @@ import os
 from collections import OrderedDict
 import gc
 import resource
+import tempfile
+import random
+
+
 
 import torch
 from torch import nn, optim
-import torchvision
+import torch.distributed as dist
+import torch.multiprocessing as mp
 from torch.nn.parallel.data_parallel import DataParallel
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torchvision
 
 from tqdm import tqdm
 from theconf import Config as C, ConfigArgumentParser
 from backpack import backpack, extend, memory_cleanup
 from backpack.extensions import BatchL2Grad
-from extensions.dot_align import DotAlignment
+from extensions.dot_align import DotAlignment, DistributedDotAlignment
 
 from RandAugment.common import get_logger, get_sum_along_batch, replace_parameters
 from RandAugment.data import get_dataloaders
@@ -33,7 +40,7 @@ logger = get_logger('RandAugment')
 logger.setLevel(logging.INFO)
 
 
-def run_epoch(model, loader, loss_fn, optimizer, desc_default='', epoch=0, writer=None, verbose=1, scheduler=None, preprocessor=None,sec_optimizer=None):
+def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='', epoch=0, writer=None, verbose=1, scheduler=None, preprocessor=None,sec_optimizer=None):
     tqdm_disable = bool(os.environ.get('TASK_NAME', ''))    # KakaoBrain Environment
     if verbose:
         logging_loader = tqdm(loader, disable=tqdm_disable)
@@ -69,6 +76,7 @@ def run_epoch(model, loader, loss_fn, optimizer, desc_default='', epoch=0, write
     gc.collect()
     torch.cuda.empty_cache()
     print('mem usage', resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    has_val_steps = C.get().get('alignment_loss', {}).get('has_val_steps', False)
     for batch in logging_loader: # logging loader might be a loader or a loader wrapped into tqdm
         data, label = batch[:2]
         steps += 1
@@ -76,8 +84,11 @@ def run_epoch(model, loader, loss_fn, optimizer, desc_default='', epoch=0, write
 
         if preprocessor:
             data = [torchvision.transforms.ToPILImage()(ti) for ti in data]
-            data = preprocessor(data,int((epoch - 1) * total_steps) + steps)
-        data, label = data.cuda(), label.cuda()
+            data = preprocessor(data,int((epoch - 1) * total_steps) + steps, validation_step=(has_val_steps and steps % 2 == 0))
+        if worldsize > 1:
+            data, label = data.to(rank), label.to(rank)
+        else:
+            data, label = data.cuda(), label.cuda()
 
         if optimizer:
             optimizer.zero_grad()
@@ -95,12 +106,20 @@ def run_epoch(model, loader, loss_fn, optimizer, desc_default='', epoch=0, write
         if optimizer:
             if 'alignment_loss' in C.get():
                 alignment_loss_flags = C.get()['alignment_loss']
-                with backpack(DotAlignment(len(data), val_batch, backpack_state, 'remove_me' == alignment_loss_flags['summation'],
-                                           'normalized' == alignment_loss_flags['summation'],
-                                           'cossim' == alignment_loss_flags['alignment_type'],
-                                           align_with=alignment_loss_flags['align_with'], use_slow_version=alignment_loss_flags.get('use_slow_version',False))):
-                    loss.backward()
-                if '2' not in alignment_loss_flags['align_with'] or steps > 1:
+                if worldsize > 1:
+                    with backpack(DistributedDotAlignment(len(data),0,backpack_state, 'cossim' == alignment_loss_flags['alignment_type'], align_with=alignment_loss_flags['align_with'])):
+                        loss.backward()
+                        if 'callbacks' in backpack_state:
+                            for c in backpack_state['callbacks']:
+                                c()
+                            backpack_state['callbacks'] = []
+                else:
+                    with backpack(DotAlignment(len(data), val_batch, backpack_state, 'remove_me' == alignment_loss_flags['summation'],
+                                               'normalized' == alignment_loss_flags['summation'],
+                                               'cossim' == alignment_loss_flags['alignment_type'],
+                                               align_with=alignment_loss_flags['align_with'], use_slow_version=alignment_loss_flags.get('use_slow_version',False))):
+                        loss.backward()
+                if ('2' not in alignment_loss_flags['align_with'] or steps > 1) and (has_val_steps and steps % 2 == 0):
                     ga = get_sum_along_batch(model, 'grad_alignments')
                 else:
                     ga = None
@@ -183,13 +202,13 @@ def run_epoch(model, loader, loss_fn, optimizer, desc_default='', epoch=0, write
     return metrics
 
 
-def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metric='last', save_path=None, only_eval=False):
+def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metric='last', save_path=None, only_eval=False):
     if not reporter:
         reporter = lambda **kwargs: 0
 
-    if not tag:
+    if not tag or rank > 0:
         from RandAugment.metrics import SummaryWriterDummy as SummaryWriter
-        logger.warning('tag not provided, no tensorboard log.')
+        logger.warning('tag not provided or rank > 0 -> no tensorboard log.')
     else:
         from tensorboardX import SummaryWriter
     writers = [SummaryWriter(log_dir='./logs2/%s/%s' % (tag, x)) for x in ['train', 'valid', 'test']]
@@ -221,10 +240,14 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
     google_augmentations.set_search_space(C.get().get('augmentation_search_space','standard'))
     max_epoch = C.get()['epoch']
     val_bs = C.get().get('val_batch',0)
-    trainsampler, trainloader, validloader, testloader_, dataset_info = get_dataloaders(C.get()['dataset'], C.get()['batch']+val_bs, dataroot, test_ratio, split_idx=cv_fold, get_meta_optimizer_factory=get_meta_optimizer_factory, summary_writer=writers[0])
+    trainsampler, trainloader, validloader, testloader_, dataset_info = get_dataloaders(C.get()['dataset'], C.get()['batch']+val_bs, dataroot, test_ratio, split_idx=cv_fold, get_meta_optimizer_factory=get_meta_optimizer_factory, distributed=worldsize>1, summary_writer=writers[0])
 
     # create a model & an optimizer
     model = get_model(C.get()['model'], C.get()['batch'], val_bs, get_meta_optimizer_factory, num_class(C.get()['dataset']), writer=writers[0])
+    if worldsize > 1:
+        model = DDP(model.to(rank), device_ids=[rank])
+    else:
+        model = model.cuda()
 
     criterion = nn.CrossEntropyLoss()
     if C.get()['optimizer']['type'] == 'sgd':
@@ -289,9 +312,13 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
                                                                           scale_embs_zero_init=preprocessor_flags.get('scale_embs_zero_init',False),
                                                                           q_residual=preprocessor_flags.get('q_residual',False),
                                                                           label_smoothing_rate=preprocessor_flags.get('label_smoothing_rate',0.),
-                                                                          device=torch.device('cuda:0'), sigmax_dist=preprocessor_flags['sigmax_dist'],
+                                                                          device=torch.device(rank if worldsize > 1 else 'cuda:0'), sigmax_dist=preprocessor_flags['sigmax_dist'],
                                                                           use_images_for_sampler=preprocessor_flags['use_images_for_sampler'],
-                                                                          summary_writer=writers[0], **extra_kwargs)
+                                                                          summary_writer=writers[0],
+                                                                          uniaug_val=preprocessor_flags['uniaug_val'],
+                                                                          old_preprocessor_val=preprocessor_flags['oldpreprocessor_val'],
+                                                                          current_preprocessor_val=preprocessor_flags.get('currpreprocessor_val',False),
+                                                                          **extra_kwargs)
 
         elif preprocessor_type == 'standard_cifar':
             image_preprocessor = StandardCIFARPreprocessor(dataset_info, C.get().get('cutout', 0))
@@ -334,10 +361,10 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
         if image_preprocessor: image_preprocessor.eval()
         rs = dict()
         with torch.no_grad():
-            rs['train'] = run_epoch(model, trainloader, criterion, None, desc_default='train', epoch=0, writer=writers[0])
-            rs['valid'] = run_epoch(model, validloader, criterion, None, desc_default='valid', epoch=0, writer=writers[1])
-            rs['test'] = run_epoch(model, testloader_, criterion, None, desc_default='*test', epoch=0, writer=writers[2])
-        for key, setname in itertools.product(['loss', 'top1', 'top5'], ['train', 'valid', 'test']):
+            rs['train'] = run_epoch(rank, worldsize, model, trainloader, criterion, None, desc_default='train', epoch=0, writer=writers[0])
+            #rs['valid'] = run_epoch(rank, worldsize, model, validloader, criterion, None, desc_default='valid', epoch=0, writer=writers[1])
+            rs['test'] = run_epoch(rank, worldsize, model, testloader_, criterion, None, desc_default='*test', epoch=0, writer=writers[2])
+        for key, setname in itertools.product(['loss', 'top1', 'top5'], ['train', 'test']):
             if setname not in rs:
                 continue
             result['%s_%s' % (key, setname)] = rs[setname][key]
@@ -347,10 +374,13 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
     # train loop
     best_top1 = 0
     for epoch in range(epoch_start, max_epoch + 1):
+        if worldsize > 1:
+            trainsampler.set_epoch(epoch)
+
         model.train()
         if image_preprocessor: image_preprocessor.train()
         rs = dict()
-        rs['train'] = run_epoch(extend(model) if 'meta_opt' in C.get() else model, trainloader, criterion, optimizer, desc_default='train', epoch=epoch, writer=writers[0], verbose=True, scheduler=scheduler, preprocessor=image_preprocessor, sec_optimizer=sec_optimizer)
+        rs['train'] = run_epoch(rank, worldsize,extend(model) if 'meta_opt' in C.get() else model, trainloader, criterion, optimizer, desc_default='train', epoch=epoch, writer=writers[0], verbose=True, scheduler=scheduler, preprocessor=image_preprocessor, sec_optimizer=sec_optimizer)
         model.eval()
         if image_preprocessor: image_preprocessor.eval()
 
@@ -359,21 +389,21 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
 
         if epoch % 5 == 0 or epoch == max_epoch:
             with torch.no_grad():
-                rs['valid'] = run_epoch(model, validloader, criterion, None, desc_default='valid', epoch=epoch, writer=writers[1], verbose=True, preprocessor=image_preprocessor)
-                rs['test'] = run_epoch(model, testloader_, criterion, None, desc_default='*test', epoch=epoch, writer=writers[2], verbose=True, preprocessor=image_preprocessor)
+                #rs['valid'] = run_epoch(rank, worldsize, model, validloader, criterion, None, desc_default='valid', epoch=epoch, writer=writers[1], verbose=True, preprocessor=image_preprocessor)
+                rs['test'] = run_epoch(rank, worldsize, model, testloader_, criterion, None, desc_default='*test', epoch=epoch, writer=writers[2], verbose=True, preprocessor=image_preprocessor)
 
             if metric == 'last' or rs[metric]['top1'] > best_top1:
                 if metric != 'last':
                     best_top1 = rs[metric]['top1']
-                for key, setname in itertools.product(['loss', 'top1', 'top5'], ['train', 'valid', 'test']):
+                for key, setname in itertools.product(['loss', 'top1', 'top5'], ['train', 'test']):
                     result['%s_%s' % (key, setname)] = rs[setname][key]
                 result['epoch'] = epoch
 
-                writers[1].add_scalar('valid_top1/best', rs['valid']['top1'], epoch)
+                #writers[1].add_scalar('valid_top1/best', rs['valid']['top1'], epoch)
                 writers[2].add_scalar('test_top1/best', rs['test']['top1'], epoch)
 
                 reporter(
-                    loss_valid=rs['valid']['loss'], top1_valid=rs['valid']['top1'],
+                    loss_valid=rs['test']['loss'], top1_valid=rs['test']['top1'],
                     loss_test=rs['test']['loss'], top1_test=rs['test']['top1']
                 )
 
@@ -384,7 +414,6 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
                         'epoch': epoch,
                         'log': {
                             'train': rs['train'].get_dict(),
-                            'valid': rs['valid'].get_dict(),
                             'test': rs['test'].get_dict(),
                         },
                         'optimizer': optimizer.state_dict(),
@@ -394,7 +423,6 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
                         'epoch': epoch,
                         'log': {
                             'train': rs['train'].get_dict(),
-                            'valid': rs['valid'].get_dict(),
                             'test': rs['test'].get_dict(),
                         },
                         'optimizer': optimizer.state_dict(),
@@ -406,8 +434,20 @@ def train_and_eval(tag, dataroot, test_ratio=0.0, cv_fold=0, reporter=None, metr
     result['top1_test'] = best_top1
     return result
 
+def setup(rank, world_size, port_suffix):
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = f'123{port_suffix}'
 
-if __name__ == '__main__':
+    # initialize the process group
+    torch.cuda.set_device(rank)
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+
+def cleanup():
+    dist.destroy_process_group()
+
+def spawn_process(rank, worldsize, port_suffix):
+    if worldsize:
+        setup(rank, worldsize, port_suffix)
     parser = ConfigArgumentParser(conflict_handler='resolve')
     parser.add_argument('--tag', type=str, default='')
     parser.add_argument('--dataroot', type=str, default='/data/private/pretrainedmodels', help='torchvision data folder')
@@ -416,6 +456,9 @@ if __name__ == '__main__':
     parser.add_argument('--cv', type=int, default=0)
     parser.add_argument('--only-eval', action='store_true')
     args = parser.parse_args()
+
+    if worldsize:
+        assert worldsize == C.get()['gpus'], "Did not specify the number of GPUs in Config with which it was started."
 
     assert (args.only_eval and args.save) or not args.only_eval, 'checkpoint path not provided in evaluation mode.'
 
@@ -432,7 +475,7 @@ if __name__ == '__main__':
 
     import time
     t = time.time()
-    result = train_and_eval(args.tag, args.dataroot, test_ratio=args.cv_ratio, cv_fold=args.cv, save_path=args.save, only_eval=args.only_eval, metric='test')
+    result = train_and_eval(rank, worldsize, args.tag, args.dataroot, test_ratio=args.cv_ratio, cv_fold=args.cv, save_path=args.save, only_eval=args.only_eval, metric='test')
     elapsed = time.time() - t
 
     logger.info('done.')
@@ -442,3 +485,17 @@ if __name__ == '__main__':
     logger.info('elapsed time: %.3f Hours' % (elapsed / 3600.))
     logger.info('top1 error in testset: %.4f' % (1. - result['top1_test']))
     logger.info(args.save)
+    if worldsize:
+        cleanup()
+
+
+if __name__ == '__main__':
+    world_size = torch.cuda.device_count()
+    port_suffix = str(random.randint(10,99))
+    if world_size > 1:
+        result = mp.spawn(spawn_process,
+                          args=(world_size,port_suffix),
+                          nprocs=world_size,
+                          join=True)
+    else:
+        spawn_process(0, 0, None)

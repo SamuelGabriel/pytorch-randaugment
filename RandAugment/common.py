@@ -30,6 +30,8 @@ def get_sum_along_batch(model, attribute):
     for param in model.parameters():
         ga = getattr(param, attribute, None)
         if ga is not None:
+            if isinstance(ga, str):
+                print(param.shape)
             grad_list.append(ga)
     return torch.stack(grad_list).sum(0)
 
