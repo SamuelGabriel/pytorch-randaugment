@@ -231,6 +231,7 @@ translate_y = TransformT('TranslateY', _translate_y_impl)
 
 def _crop_impl(pil_img, level, interpolation=Image.BILINEAR):
   """Applies a crop to `pil_img` with the size depending on the `level`."""
+  level = int_parameter(level, 10)
   w = pil_img.width
   h = pil_img.height
   cropped = pil_img.crop((level, level, w - level, h - level))
@@ -325,6 +326,28 @@ opt_flip_ud = TransformT(
     optionalize(lambda pil_img, level: pil_img.transpose(Image.FLIP_TOP_BOTTOM)))
 opt_blur = TransformT(
     'OptBlur', optionalize(lambda pil_img, level: pil_img.filter(ImageFilter.BLUR)))
+opt_contour = TransformT(
+    'OptContour', optionalize(lambda pil_img, level: pil_img.filter(ImageFilter.CONTOUR)))
+opt_detail = TransformT(
+    'OptDetail', optionalize(lambda pil_img, level: pil_img.filter(ImageFilter.DETAIL)))
+opt_edge_enhance = TransformT(
+    'OptEdgeEnhance', optionalize(lambda pil_img, level: pil_img.filter(ImageFilter.EDGE_ENHANCE)))
+opt_sharpen = TransformT(
+    'OptSharpen', optionalize(lambda pil_img, level: pil_img.filter(ImageFilter.SHARPEN)))
+opt_max = TransformT(
+    'OptMax', optionalize(lambda pil_img, level: pil_img.filter(ImageFilter.MaxFilter)))
+opt_min = TransformT(
+    'OptMin', optionalize(lambda pil_img, level: pil_img.filter(ImageFilter.MinFilter)))
+opt_median = TransformT(
+    'OptMedian', optionalize(lambda pil_img, level: pil_img.filter(ImageFilter.MedianFilter)))
+opt_gaussian = TransformT(
+    'OptGaussian', optionalize(lambda pil_img, level: pil_img.filter(ImageFilter.GaussianBlur)))
+opt_black = TransformT(
+    'OptBlack', optionalize(lambda pil_img, level: ImageOps.posterize(pil_img, 0))
+)
+opt_labelnoise = TransformT(
+    'OptLabelNoise', optionalize(lambda pil_img, level: blend_images[np.random.choice(len(blend_images))])
+)
 
 blend_images = None
 
@@ -379,7 +402,7 @@ def set_search_space(search_space):
             posterize=MinMax(4,8)
         )
 
-    if 'long' in search_space:
+    if 'opt_long' in search_space:
         ALL_TRANSFORMS = [
             identity,
             opt_auto_contrast,
@@ -400,6 +423,61 @@ def set_search_space(search_space):
             opt_invert,
             opt_flip_lr,
             opt_flip_ud,
+            cutout
+        ]
+    elif 'opt_xlong' in search_space:
+            ALL_TRANSFORMS = [
+                identity,
+                opt_auto_contrast,
+                opt_equalize,
+                rotate,
+                solarize,
+                color,
+                posterize,
+                contrast,
+                brightness,
+                sharpness,
+                shear_x,
+                shear_y,
+                translate_x,
+                translate_y,
+                sample_pairing,
+                opt_blur,
+                opt_invert,
+                opt_flip_lr,
+                opt_flip_ud,
+                cutout,
+                crop_bilinear,
+                opt_contour,
+                opt_detail,
+                opt_edge_enhance,
+                opt_sharpen,
+                opt_max,
+                opt_min,
+                opt_median,
+                opt_gaussian,
+            ]
+    elif 'long' in search_space:
+        ALL_TRANSFORMS = [
+            identity,
+            auto_contrast,
+            equalize,
+            rotate,
+            solarize,
+            color,
+            posterize,
+            contrast,
+            brightness,
+            sharpness,
+            shear_x,
+            shear_y,
+            translate_x,
+            translate_y,
+            # sample_pairing,
+            blur,
+            invert,
+            flip_lr,
+            flip_ud,
             cutout
         ]
     elif 'uniaug' in search_space:
@@ -439,6 +517,17 @@ def set_search_space(search_space):
             brightness,
             sharpness,
             cutout  # only uniaug
+        ]
+    elif 'unittest' in search_space:
+        ALL_TRANSFORMS = [
+            identity,
+            shear_x,
+            shear_y,
+            translate_x,
+            translate_y,
+            rotate,
+            opt_black,
+            opt_labelnoise
         ]
     else:
         print("Using standard aug ops.")
