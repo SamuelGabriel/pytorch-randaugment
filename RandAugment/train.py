@@ -119,7 +119,7 @@ def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='
                                                'cossim' == alignment_loss_flags['alignment_type'],
                                                align_with=alignment_loss_flags['align_with'], use_slow_version=alignment_loss_flags.get('use_slow_version',False))):
                         loss.backward()
-                if ('2' not in alignment_loss_flags['align_with'] or steps > 1) and (has_val_steps and steps % 2 == 0):
+                if ('2' not in alignment_loss_flags['align_with'] or steps > 1) and (not has_val_steps or steps % 2 == 0):
                     ga = get_sum_along_batch(model, 'grad_alignments')
                 else:
                     ga = None
@@ -211,7 +211,7 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
         logger.warning('tag not provided or rank > 0 -> no tensorboard log.')
     else:
         from tensorboardX import SummaryWriter
-    writers = [SummaryWriter(log_dir='./logs2/%s/%s' % (tag, x)) for x in ['train', 'valid', 'test']]
+    writers = [SummaryWriter(log_dir='./logs3/%s/%s' % (tag, x)) for x in ['train', 'valid', 'test']]
 
     def get_meta_optimizer_factory():
         meta_flags = C.get().get('meta_opt',{})
@@ -310,14 +310,16 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
                                                                           model_for_online_tests=None,
                                                                           q_zero_init=preprocessor_flags['q_zero_init'],
                                                                           scale_embs_zero_init=preprocessor_flags.get('scale_embs_zero_init',False),
+                                                                          scale_embs_zero_strength_bias=preprocessor_flags.get('scale_embs_zero_strength_bias',0.),
                                                                           q_residual=preprocessor_flags.get('q_residual',False),
                                                                           label_smoothing_rate=preprocessor_flags.get('label_smoothing_rate',0.),
-                                                                          device=torch.device(rank if worldsize > 1 else 'cuda:0'), sigmax_dist=preprocessor_flags['sigmax_dist'],
+                                                                          device=torch.device(rank if worldsize > 1 else 'cuda:0'), sigmax_dist=preprocessor_flags['sigmax_dist'], exploresoftmax_dist=preprocessor_flags['exploresoftmax_dist'],
                                                                           use_images_for_sampler=preprocessor_flags['use_images_for_sampler'],
                                                                           summary_writer=writers[0],
                                                                           uniaug_val=preprocessor_flags['uniaug_val'],
                                                                           old_preprocessor_val=preprocessor_flags['oldpreprocessor_val'],
-                                                                          current_preprocessor_val=preprocessor_flags.get('currpreprocessor_val',False),
+                                                                          current_preprocessor_val=preprocessor_flags.get('currpreprocessor_val', False),
+                                                                          aug_probs=preprocessor_flags.get('aug_probs', False),
                                                                           **extra_kwargs)
 
         elif preprocessor_type == 'standard_cifar':

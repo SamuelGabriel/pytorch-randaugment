@@ -134,3 +134,43 @@ def relabssum(logits, d):
 def log_relabssum(logits, d):
     return torch.log(relabssum(logits,d))
 
+alpha = .1
+
+def exploresoftmax(logits, d):
+    return torch.softmax(logits,d) * (1.-alpha) + torch.ones_like(logits) * alpha / logits.shape[d]
+
+class LogExpSoftmaxImpl(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, logits, d):
+        """
+        In the forward pass we receive a Tensor containing the input and return
+        a Tensor containing the output. ctx is a context object that can be used
+        to stash information for backward computation. You can cache arbitrary
+        objects for use in the backward pass using the ctx.save_for_backward method.
+        """
+        if not isinstance(d, int):
+            d = d.cpu().item()
+        ctx.d = d
+        ctx.save_for_backward(logits)
+        return torch.log(exploresoftmax(logits,d))
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        """
+        In the backward pass we receive a Tensor containing the gradient of the loss
+        with respect to the output, and we need to compute the gradient of the loss
+        with respect to the input.
+        """
+        logits, = ctx.saved_tensors
+        d = ctx.d
+        logits = logits.clone().requires_grad_(True)
+        with torch.enable_grad():
+            log_sm = torch.log_softmax(logits,d)
+        log_sm_grad, = torch.autograd.grad(log_sm,logits,grad_output/ \
+               (1. + (alpha / (torch.softmax(logits,d)*(1.-alpha)*logits.shape[d]) )))
+        del ctx.d
+        return log_sm_grad, None
+
+def log_exploresoftmax(logits, d):
+    return LogExpSoftmaxImpl.apply(logits, d) # was tested against AD
+
