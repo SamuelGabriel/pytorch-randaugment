@@ -560,3 +560,38 @@ class UniAugment:
             img = op.pil_transformer(probability,level)(img)
         return img
 
+
+class AlwaysTwoUniAug:
+    def __call__(self, img):
+        ops = random.choices(ALL_TRANSFORMS, k=2)
+        for op in ops:
+            level = random.randint(0, PARAMETER_MAX)
+            img = op.pil_transformer(1., level)(img)
+        return img
+
+
+class OnetoFourUniAug:
+    def __call__(self, img):
+        k = random.randint(1, 4)
+        ops = random.choices(ALL_TRANSFORMS, k=k)
+        for op in ops:
+            probability = random.random()
+            level = random.randint(0, PARAMETER_MAX)
+            img = op.pil_transformer(probability, level)(img)
+        return img
+
+images_seen = 0
+class OnetoFourEverySecondUniAug:
+    def __init__(self, bs):
+        self.bs = bs
+    def __call__(self, img):
+        global images_seen
+        step = images_seen // self.bs
+        if step % 2 == 0:
+            k = random.randint(1, 4)
+            ops = random.choices(ALL_TRANSFORMS, k=k)
+            for op in ops:
+                level = random.randint(0, PARAMETER_MAX)
+                img = op.pil_transformer(0.5, level)(img)
+        images_seen += 1
+        return img

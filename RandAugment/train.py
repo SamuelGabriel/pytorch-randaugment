@@ -164,9 +164,10 @@ def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='
                 call_attr_on_meta_modules('step',ga)
             if C.get()['optimizer'].get('clip', 5) > 0:
                 nn.utils.clip_grad_norm_(model.parameters(), C.get()['optimizer'].get('clip', 5))
-            optimizer.step()
-            if sec_optimizer is not None:
-                sec_optimizer.step()
+            if steps % C.get().get('step_optimizer_every', 1) == 0:
+                optimizer.step()
+                if sec_optimizer is not None:
+                    sec_optimizer.step()
             del ga
 
         top1, top5 = accuracy(preds, label, (1, 5))
@@ -320,6 +321,7 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
                                                                           old_preprocessor_val=preprocessor_flags['oldpreprocessor_val'],
                                                                           current_preprocessor_val=preprocessor_flags.get('currpreprocessor_val', False),
                                                                           aug_probs=preprocessor_flags.get('aug_probs', False),
+                                                                          use_non_embedding_sampler=preprocessor_flags.get('non_embedding_sampler',False),
                                                                           **extra_kwargs)
 
         elif preprocessor_type == 'standard_cifar':

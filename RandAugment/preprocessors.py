@@ -290,6 +290,7 @@ class LearnedPreprocessorRandaugmentSpace(ImagePreprocessor):
                 for i, p_ in enumerate(p_scale.mean(0)):
                     self.summary_writer.add_scalar(f'PreprocessorWeightsScale/p_{i}', p_, step)
 
+
 class RandAugmentationSampler(nn.Module):
     def __init__(self, hidden_dimension, num_transforms, num_scales, possible_num_sequential_transforms, q_residual, q_zero_init, scale_embs_zero_init, scale_embs_zero_strength_bias,
                  label_smoothing_rate, distribution_functions, use_images, aug_probs, dataset_info):
@@ -334,44 +335,207 @@ class RandAugmentationSampler(nn.Module):
             else:
                 p.grad += p_copy.grad
 
-    def compute_q(self, imgs):
+    def compute_q(self, imgs=None):
         if self.use_images:
+            assert imgs is not None
             image_batch = torch.stack([self.normalize(torchvision.transforms.ToTensor()(i)) for i in imgs]).to(self.convnet.final_fc.weight.device)
             return self.convnet(image_batch)
         else:
             return self.q_param.unsqueeze(0).expand(len(imgs),-1)
 
     def forward(self, imgs):
+        self.imgs = imgs
         num_samples = len(imgs)
-        self.q = self.compute_q(imgs)
-        self.num_transforms_logits = self.q @ self.num_transforms_embs.t()
+        num_ops = len(self.op_embs)
+        max_num_sequential_transforms = len(self.num_transforms_embs)
+        augmentation_inds = torch.randint(num_ops,(num_samples,max_num_sequential_transforms))
+        self.augmentation_inds = augmentation_inds
+        self.q = self.compute_q(imgs) # num_samples x hidden
+
+        self.num_transforms_logits = self.q @ self.num_transforms_embs.t() # num_samples x max_num_sequential_transforms
         self.p_num_transforms = self.dist(self.num_transforms_logits, -1)
-        self.log_p_num_transforms = self.log_dist(self.num_transforms_logits, -1)
-        sampled_transform_indices = torch.multinomial(self.p_num_transforms, 1, replacement=True).squeeze(1)
+        sampled_transform_indices = torch.multinomial(self.p_num_transforms, 1, replacement=True).squeeze(1) # num_samples
+        self.sampled_numaug_indices = sampled_transform_indices
         sampled_num_transforms = self.possible_num_sequential_transforms[sampled_transform_indices]
-        augmentation_inds = torch.randint(len(self.op_embs),(num_samples,len(self.num_transforms_embs)-1))#, device=self.q.device)
-        augmentation_mask = torch.arange(len(self.num_transforms_embs)-1).unsqueeze(0).expand(num_samples,len(self.num_transforms_embs)-1).to(sampled_num_transforms.device) >= sampled_num_transforms.unsqueeze(1)
+        augmentation_mask = torch.arange(max_num_sequential_transforms).unsqueeze(0).expand(num_samples,max_num_sequential_transforms).to(sampled_num_transforms.device) >= sampled_num_transforms.unsqueeze(1) # num_samples x max_num_seq_transforms
         self.augmentation_mask = augmentation_mask
+
+        self.scale_logits = scale_logits = self.get_scale_logits(augmentation_inds, q=self.q) # num_samples x max_num_seq_tran x num_scales
+        p_scale = self.dist(scale_logits, 2)
+        sampled_scales = torch.multinomial(p_scale.view(-1,p_scale.shape[2]), 1, replacement=True).view(num_samples, max_num_sequential_transforms)
+        self.sampled_scales = sampled_scales
+        log_ps_of_sampled_scales = self.get_scale_logps(sampled_scales, scale_logits) # num_samples x max_num_seq_tran
+
         augmentation_inds[augmentation_mask] = 0 # index of identity augmentation
+        log_ps_of_sampled_scales[augmentation_mask] = 0.
+
+        if self.aug_logits is not None:
+            aug_logits = self.aug_logits # num_ops
+            aug_ps = torch.sigmoid(aug_logits)
+            keep = torch.bernoulli(aug_ps[augmentation_inds]) # num_samples x max_num_seq_trans
+            aug_logps = self.get_aug_logps(keep, augmentation_inds, augmentation_mask) # num_samples x max_num_seq_trans
+            augmentation_inds[keep == 0.0] = 0
+            log_ps_of_sampled_scales[keep == 0.0] = 0.0
+            self.logps = self.get_numaug_logps(sampled_transform_indices, self.num_transforms_logits) + log_ps_of_sampled_scales.sum(1) + aug_logps
+        else:
+            self.logps = self.get_numaug_logps(sampled_transform_indices, self.num_transforms_logits) + log_ps_of_sampled_scales.sum(1)
+        return augmentation_inds.cpu(), sampled_scales.cpu()
+
+    def evaluate(self, imgs, augmentation_inds, sampled_numaug_indices, augmentation_mask, sampled_scales, keep=None):
+        q = self.compute_q(imgs)
+        num_transforms_logits = q @ self.num_transforms_embs.t()
+        numaug_logps = self.get_numaug_logps(sampled_numaug_indices, num_transforms_logits)
+
+        scale_logits = self.get_scale_logits(augmentation_inds,q)
+        scale_logps = self.get_scale_logps(sampled_scales, scale_logits)
+
+        scale_logits[augmentation_mask] = 0.
+
+        if self.aug_logits is not None:
+            assert keep is not None
+            aug_logps = self.get_aug_logps(keep, augmentation_inds, augmentation_mask)
+            scale_logps[keep == 0.0] = 0.0
+
+        return numaug_logps + scale_logps.sum(1) + aug_logps
+
+    def get_scale_logps(self, sampled_scales, scale_logits):
+        log_p_scale = self.log_dist(scale_logits, 2)
+        flat_log_p_scale = log_p_scale.view(-1,log_p_scale.shape[2])
+        log_ps_of_sampled_scales = flat_log_p_scale[torch.arange(len(flat_log_p_scale)),sampled_scales.flatten()].view_as(sampled_scales)
+        return log_ps_of_sampled_scales
+
+    def get_numaug_logps(self, sampled_numaug_indices, num_transforms_logits):
+        self.log_p_num_transforms = self.log_dist(num_transforms_logits, -1)
+        return self.log_p_num_transforms[torch.arange(len(self.log_p_num_transforms)), sampled_numaug_indices]
+
+    def get_aug_logps(self, keep, augmentation_inds, augmentation_mask):
+        aug_logits = self.aug_logits
+        aug_ps = torch.sigmoid(aug_logits)
+        aug_1logps = torch.nn.functional.logsigmoid(aug_logits)
+        aug_0logps = torch.log(1. - aug_ps + 10E-6)
+        del aug_ps
+        augmentation_inds[keep == 0.0] = 0  # index of id
+        aug_logps = torch.gather(torch.cat([aug_0logps, aug_1logps]), 0,
+                                 augmentation_inds.cuda().flatten() + (keep.int().flatten() * len(aug_0logps))).view_as(
+            augmentation_inds)
+        aug_logps[augmentation_mask] = 0.
+        aug_logps = aug_logps.sum(1)
+        return aug_logps
+
+    def get_scale_logits(self, augmentation_inds, q):
+        if q is None:
+            q = self.compute_q() # images???
         if self.use_images:
-            hidden = self.q
+            hidden = q
             scale_logits = torch.einsum('bh,bosh->bos',hidden,self.scale_embs[augmentation_inds])
         else:
             hidden = self.op_embs[augmentation_inds]
             if self.q_residual:
-                hidden += self.q.unsqueeze(1).expand(-1, hidden.shape[1], -1)
+                hidden += q.unsqueeze(1).expand(-1, hidden.shape[1], -1)
             scale_logits = hidden @ self.scale_embs.t()
-
 
         if self.scale_embs_zero_strength_bias:
             scale_logits[:,:,0] += self.scale_embs_zero_strength_bias
-        self.scale_logits = scale_logits
-        p_scale = self.dist(scale_logits, 2)
-        log_p_scale = self.log_dist(scale_logits, 2)
-        sampled_scales = torch.multinomial(p_scale.view(-1,p_scale.shape[2]), 1, replacement=True).view(p_scale.shape[:2])
-        flat_log_p_scale = log_p_scale.view(-1,log_p_scale.shape[2])
-        log_ps_of_sampled_scales = flat_log_p_scale[torch.arange(len(flat_log_p_scale)),sampled_scales.flatten()].view_as(sampled_scales)
-        del flat_log_p_scale, log_p_scale, p_scale
+        return scale_logits
+
+    def get_numaug_entropy(self):
+        neg_entropy = torch.einsum('bt,bt->b', self.p_num_transforms,
+                                   (self.log_p_num_transforms * (self.p_num_transforms != 0.))).mean()
+        return - neg_entropy
+
+    def get_scale_entropy(self):
+        log_p_scale = self.log_dist(self.scale_logits, 2)
+        p_scale = self.dist(self.scale_logits, 2)
+        gpu_aug_mask_float = self.augmentation_mask.float().to(p_scale.device)
+        avg_neg_entropy = (torch.einsum('bos,bos->bo', p_scale,
+                                        log_p_scale * (p_scale != 0.)) * (1. - gpu_aug_mask_float)).sum() / (
+                                  1. - gpu_aug_mask_float).sum()  # here we could have logp = -inf and p = 0.
+        return - avg_neg_entropy
+
+    def get_numaug_distribution(self):
+        return self.p_num_transforms.mean(0)
+
+    def get_scale_distribution(self):
+        augmentation_inds = torch.arange(len(self.op_embs)).unsqueeze(0).expand(len(self.q), -1)
+        scale_logits = self.get_scale_logits(augmentation_inds, self.q)
+        p_scale = self.dist(scale_logits, 2).mean(0)
+        return p_scale
+
+def update(model: RandAugmentationSampler, opt, all_rewards, ent_alpha):
+    mse_loss = nn.MSELoss()
+    epochs = 4
+    eps_clip = .2
+
+
+    for _ in range(epochs):
+        data_loader = torch.utils.data.DataLoader(
+            torch.utils.data.TensorDataset(model.imgs, model.augmentation_inds, model.sampled_numaug_indices, model.augmentation_mask, model.sampled_scales, model.keep, all_rewards), batch_size=32,shuffle=True,drop_last=True)
+        for imgs, augmentation_inds, sampled_numaug_indices, augmentation_mask, sampled_scales, rewards in data_loader:
+            with torch.autograd.set_detect_anomaly(True):
+                # Evaluating old actions and values :
+                logprobs, state_values, dist_entropy = model.evaluate(imgs,augmentation_inds,sampled_numaug_indices, augmentation_mask, sampled_scales,)
+
+                # Finding the ratio (pi_theta / pi_theta__old):
+                ratios = torch.exp(logprobs - old_logprobs)
+                if torch.isinf(ratios).any():
+                    continue
+
+                # Finding Surrogate Loss:
+                advantages = rewards - state_values.detach()
+                surr1 = ratios * advantages
+                surr2 = torch.clamp(ratios, 1 - eps_clip, 1 + eps_clip) * advantages
+                loss = -torch.min(surr1, surr2) + 0.5 * mse_loss(state_values, rewards) - ent_alpha * dist_entropy.sum(1)
+
+                # take gradient step
+                opt.zero_grad()
+                loss.mean().backward()
+                opt.step()
+
+
+class NonEmbeddingRandAugmentationSampler(nn.Module):
+    def __init__(self, hidden_dimension, num_transforms, num_scales, possible_num_sequential_transforms, q_residual, q_zero_init, scale_embs_zero_init, scale_embs_zero_strength_bias,
+                 label_smoothing_rate, distribution_functions, use_images, aug_probs, dataset_info):
+        super().__init__()
+        assert not use_images
+        self.dist, self.log_dist = distribution_functions
+        if aug_probs:
+            self.aug_logits = nn.Parameter(torch.zeros(num_transforms, requires_grad=True))
+        else:
+            self.aug_logits = None
+        self.num_transforms_logits = nn.Parameter(torch.zeros(len(possible_num_sequential_transforms), requires_grad=True))
+
+        self.scale_logits = nn.Parameter(torch.zeros(num_transforms,num_scales, requires_grad=True))
+        self.label_smoothing_rate = label_smoothing_rate
+
+        self.possible_num_sequential_transforms = possible_num_sequential_transforms
+        self.scale_embs_zero_strength_bias = scale_embs_zero_strength_bias
+
+    def add_grad_of_copy(self, copy):
+        # zero grad beforehand
+        for p, p_copy in zip(self.parameters(), copy.parameters()):
+            if p.grad is None:
+                p.grad = p_copy.grad
+            else:
+                p.grad += p_copy.grad
+
+    def forward(self, imgs):
+        num_samples = len(imgs)
+        self.p_num_transforms = self.dist(self.num_transforms_logits, -1)
+        self.log_p_num_transforms = self.log_dist(self.num_transforms_logits, -1)
+        sampled_transform_indices = torch.multinomial(self.p_num_transforms, len(imgs), replacement=True)
+        sampled_num_transforms = self.possible_num_sequential_transforms[sampled_transform_indices]
+        augmentation_inds = torch.randint(self.scale_logits.shape[0],(num_samples,self.p_num_transforms.shape[0]))#, device=self.q.device)
+        augmentation_mask = torch.arange(augmentation_inds.shape[1]).unsqueeze(0).expand(num_samples,augmentation_inds.shape[1]).to(sampled_num_transforms.device) >= sampled_num_transforms.unsqueeze(1)
+        self.augmentation_mask = augmentation_mask
+        augmentation_inds[augmentation_mask] = 0 # index of identity augmentation
+
+        scale_logits = self.scale_logits
+        if self.scale_embs_zero_strength_bias:
+            scale_logits[:,0] += self.scale_embs_zero_strength_bias
+        scale_log_ps = self.log_dist(self.scale_logits,1)
+        scale_ps = self.dist(self.scale_logits,1)
+        sampled_scales = torch.multinomial(scale_ps[augmentation_inds.flatten()],1).view_as(augmentation_inds)
+        log_ps_of_sampled_scales = scale_log_ps[augmentation_inds.flatten(),sampled_scales.flatten()].view_as(sampled_scales)
         log_ps_of_sampled_scales[augmentation_mask] = 0.
         if self.aug_logits is not None:
             aug_logits = self.aug_logits  # [augmentation_inds.flatten()].view_as(augmentation_inds)
@@ -390,10 +554,31 @@ class RandAugmentationSampler(nn.Module):
 
             del aug_1logps, aug_0logps
             log_ps_of_sampled_scales[keep == 0.0] = 0.0
-            self.logps = self.log_p_num_transforms[torch.arange(len(self.log_p_num_transforms)),sampled_transform_indices] + log_ps_of_sampled_scales.sum(1) + aug_logps
+            self.logps = self.log_p_num_transforms[sampled_transform_indices] + log_ps_of_sampled_scales.sum(1) + aug_logps
         else:
-            self.logps = self.log_p_num_transforms[torch.arange(len(self.log_p_num_transforms)),sampled_transform_indices] + log_ps_of_sampled_scales.sum(1)
+            self.logps = self.log_p_num_transforms[sampled_transform_indices] + log_ps_of_sampled_scales.sum(1)
         return augmentation_inds.cpu(), sampled_scales.cpu()
+
+    def get_numaug_entropy(self):
+        neg_entropy = self.p_num_transforms @ (self.log_p_num_transforms * (self.p_num_transforms != 0.))
+        return -neg_entropy
+
+    def get_scale_entropy(self):
+        log_p_scale = self.log_dist(self.scale_logits, 1)
+        p_scale = self.dist(self.scale_logits, 1)
+        gpu_aug_mask_float = self.augmentation_mask.float().to(p_scale.device)
+        avg_neg_entropy = (torch.einsum('os,os->o', p_scale,
+                                        log_p_scale * (p_scale != 0.)) * (1. - gpu_aug_mask_float)).sum() / (
+                                      1. - gpu_aug_mask_float).sum()  # here we could have logp = -inf and p = 0.
+
+        return - avg_neg_entropy
+
+    def get_scale_distribution(self):
+        return self.dist(self.scale_logits, 1)
+
+    def get_numaug_distribution(self):
+        return self.p_num_transforms
+
 
 
 class LearnedRandAugmentPreprocessor(ImagePreprocessor):
@@ -401,7 +586,7 @@ class LearnedRandAugmentPreprocessor(ImagePreprocessor):
                  importance_sampling=False, cutout=0, normalize_reward=True, model_for_online_tests=None,
                  D_out=10, q_zero_init=True, q_residual=False, scale_embs_zero_init=False, scale_embs_zero_strength_bias=0., label_smoothing_rate=0.,
                  possible_num_sequential_transforms=[1,2,3,4], sigmax_dist=False, exploresoftmax_dist=False, use_images_for_sampler=False, uniaug_val=False, old_preprocessor_val=False, current_preprocessor_val=False,
-                 aug_probs=False, summary_prefix='', **kwargs):
+                 aug_probs=False, use_non_embedding_sampler=False, summary_prefix='', **kwargs):
         super().__init__(**kwargs)
         print('using learned preprocessor')
 
@@ -419,7 +604,7 @@ class LearnedRandAugmentPreprocessor(ImagePreprocessor):
         if exploresoftmax_dist:
             dists = (exploresoftmax, log_exploresoftmax)
 
-        self.augmentation_sampler = RandAugmentationSampler(hidden_dimension, self.num_transforms, self.num_scales, torch.tensor(possible_num_sequential_transforms),
+        self.augmentation_sampler = (NonEmbeddingRandAugmentationSampler if use_non_embedding_sampler else RandAugmentationSampler)(hidden_dimension, self.num_transforms, self.num_scales, torch.tensor(possible_num_sequential_transforms),
                                                         q_residual, q_zero_init, scale_embs_zero_init, scale_embs_zero_strength_bias,
                                                         label_smoothing_rate, dists,use_images_for_sampler, aug_probs, dataset_info).to(self.device)
         self.agumentation_sampler_copies = []
@@ -476,12 +661,21 @@ class LearnedRandAugmentPreprocessor(ImagePreprocessor):
                 aug_sampler = deepcopy(self.augmentation_sampler)
                 self.agumentation_sampler_copies.append(aug_sampler)
                 sampled_op_idxs, sampled_scales = aug_sampler(imgs[:self.bs])
-                activated_transforms_for_batch = [[(i,s) for i,s in zip(i_s,s_s)] for i_s,s_s in zip(sampled_op_idxs,sampled_scales)] + self.val_augmentations(imgs[self.bs:]) # [self.val_augmentations() for _ in range(self.val_bs)]
+                activated_transforms_for_batch = [[(i.item(),s.item()) for i,s in zip(i_s,s_s)] for i_s,s_s in zip(sampled_op_idxs,sampled_scales)] + self.val_augmentations(imgs[self.bs:]) # [self.val_augmentations() for _ in range(self.val_bs)]
                 self.write_summary(aug_sampler, step)
         else:
             activated_transforms_for_batch = [[(0, 1.)] for i in imgs]  # do not apply any augmentation when evaluating
         t_imgs = []
         google_augmentations.blend_images = imgs
+        #print(activated_transforms_for_batch)
+        #print(sum([l[0]==0 for ll in activated_transforms_for_batch for l in ll])/sum(1 for ll in activated_transforms_for_batch for l in ll))
+        #total_ops = sum(1 for ll in activated_transforms_for_batch for l in ll)
+        #aug_type_counts = Counter([l[0] for ll in activated_transforms_for_batch for l in ll])
+        #print(sorted([(k,v/total_ops) for k,v in aug_type_counts.items()]))
+        #aug_type_counts_in_first = Counter([ll[0][0] for ll in activated_transforms_for_batch])
+        #print(sorted([(k,v/len(activated_transforms_for_batch)) for k,v in aug_type_counts_in_first.items()]))
+        #strength_counts = Counter([l[1] for ll in activated_transforms_for_batch for l in ll])
+        #print(sorted([(k,v/total_ops) for k,v in strength_counts.items()]))
         for i, (img, augs) in enumerate(zip(imgs, activated_transforms_for_batch)):
             for op, scale in augs:
                 img = google_augmentations.apply_augmentation(op, scale, img)
@@ -517,16 +711,11 @@ class LearnedRandAugmentPreprocessor(ImagePreprocessor):
         aug_sampler.zero_grad()
         loss = -aug_sampler.logps @ weights.detach() / float(len(weights))
         if self.entropy_alpha:
-            neg_entropy = torch.einsum('bt,bt->b',aug_sampler.p_num_transforms,(aug_sampler.log_p_num_transforms * (aug_sampler.p_num_transforms != 0.))).mean()
-            loss += self.entropy_alpha * neg_entropy
+            ent = aug_sampler.get_numaug_entropy()
+            loss -= self.entropy_alpha * ent
         if self.scale_entropy_alpha:
-            log_p_scale = aug_sampler.log_dist(aug_sampler.scale_logits, 2)
-            p_scale = aug_sampler.dist(aug_sampler.scale_logits, 2)
-            gpu_aug_mask_float = aug_sampler.augmentation_mask.float().to(p_scale.device)
-            avg_neg_entropy = (torch.einsum('bos,bos->bo', p_scale,
-                        log_p_scale * (p_scale != 0.)) * (1.-gpu_aug_mask_float)).sum() / (1.-gpu_aug_mask_float).sum()  # here we could have logp = -inf and p = 0.
-
-            loss += self.scale_entropy_alpha * avg_neg_entropy
+            ent = aug_sampler.get_scale_entropy()
+            loss -= self.scale_entropy_alpha * ent
 
         loss.backward()
         torch.nn.utils.clip_grad_value_(aug_sampler.parameters(), 5.)
@@ -553,20 +742,9 @@ class LearnedRandAugmentPreprocessor(ImagePreprocessor):
     def write_summary(self, aug_sampler, step):
         if step % 101 == 0 and self.summary_writer is not None and self.training:
             with torch.no_grad():
-                for i,p in enumerate(aug_sampler.p_num_transforms.mean(0)):
+                for i,p in enumerate(aug_sampler.get_numaug_distribution()):
                     self.summary_writer.add_scalar(f'{self.summary_prefix}NumAugs/{i}', p, step)
-                augmentation_inds = torch.arange(len(aug_sampler.op_embs)).unsqueeze(0).expand(len(aug_sampler.q),-1)
-                if aug_sampler.use_images:
-                    hidden = aug_sampler.q
-                    scale_logits = torch.einsum('bh,bosh->bos', hidden, aug_sampler.scale_embs[augmentation_inds])
-                else:
-                    hidden = aug_sampler.op_embs[augmentation_inds]
-                    if aug_sampler.q_residual:
-                        hidden += aug_sampler.q.unsqueeze(1).expand(-1,hidden.shape[1],-1)
-                    scale_logits = hidden @ aug_sampler.scale_embs.t()
-                if aug_sampler.scale_embs_zero_strength_bias:
-                    scale_logits[:, :, 0] += aug_sampler.scale_embs_zero_strength_bias
-                p_scale = aug_sampler.dist(scale_logits, 2).mean(0)
+                p_scale = aug_sampler.get_scale_distribution()
 
                 for aug_idx, scale_dist in enumerate(p_scale):
                     self.summary_writer.add_scalar(f'{self.summary_prefix}AvgScale/aug_{aug_idx}', scale_dist @ torch.arange(scale_dist.shape[-1],dtype=scale_dist.dtype,device=scale_dist.device), step)

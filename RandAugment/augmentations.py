@@ -84,8 +84,18 @@ class CutoutDefault(object):
         return img
 
 
-def get_randaugment(n,m):
-    if n == 0 and m == 0:
-        return google_augmentations.UniAugment()
+def get_randaugment(n,m,bs):
+    if m == 0:
+        if n == 0:
+            return google_augmentations.UniAugment()
+        elif n == 2:
+            return google_augmentations.AlwaysTwoUniAug()
+        elif n == 4:
+            return google_augmentations.OnetoFourUniAug()
+        elif n == 8:
+            return google_augmentations.OnetoFourEverySecondUniAug(bs)
+        else:
+            raise ValueError('Wrong RandAug Params.')
     else:
+        assert n > 0 and m > 0
         return google_augmentations.RandAugment(n, m)
