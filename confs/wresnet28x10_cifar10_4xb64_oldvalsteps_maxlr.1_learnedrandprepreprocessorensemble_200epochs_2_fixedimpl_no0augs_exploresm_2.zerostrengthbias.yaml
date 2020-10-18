@@ -5,7 +5,7 @@ cutout: 16
 aug: default
 
 preprocessor:
-  type: learned_random_randaugmentspace
+  type: learned_random_randaugmentspace_ensemble
   entropy_alpha: 0.
   hidden_dim: 100
   scale_entropy_alpha: .0
@@ -18,13 +18,18 @@ preprocessor:
   importance_sampling: false
   label_smoothing_rate: .0
   possible_num_sequential_transforms: [1,2,3,4]
-  sigmax_dist: true
+  sigmax_dist: false
+  scale_embs_zero_strength_bias: 2.0
+  exploresoftmax_dist: true
+  oldpreprocessor_val: true
+  uniaug_val: false
 
 alignment_loss:
   summation: standard
   align_with: '2'
   val_share: .0
   alignment_type: dot
+  has_val_steps: true
 
 meta_opt:
   meta_optimizer:
@@ -32,7 +37,8 @@ meta_opt:
     lr: .001
     beta1: .0
     beta2: .999
-batch: 128
+gpus: 4
+batch: 64
 epoch: 200
 lr: 0.05
 lr_schedule:

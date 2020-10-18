@@ -1,5 +1,7 @@
 model:
   type: wresnet28_10
+  groupnorm: true
+  dropout: 0.2
 dataset: cifar10
 cutout: 16
 aug: default
@@ -18,7 +20,7 @@ preprocessor:
   importance_sampling: false
   label_smoothing_rate: .0
   possible_num_sequential_transforms: [1,2,3,4]
-  sigmax_dist: true
+  sigmax_dist: false
 
 alignment_loss:
   summation: standard

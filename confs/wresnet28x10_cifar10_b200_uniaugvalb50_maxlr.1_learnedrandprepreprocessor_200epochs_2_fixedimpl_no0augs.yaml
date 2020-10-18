@@ -12,13 +12,14 @@ preprocessor:
   online_tests_on_model: false
   q_zero_init: true
   q_residual: false
-  use_images_for_sampler: false
   scale_embs_zero_init: true
   normalize_reward: true
   importance_sampling: false
   label_smoothing_rate: .0
   possible_num_sequential_transforms: [1,2,3,4]
-  sigmax_dist: true
+  sigmax_dist: false
+  use_images_for_sampler: false
+  uniaug_val: true
 
 alignment_loss:
   summation: standard
@@ -32,7 +33,8 @@ meta_opt:
     lr: .001
     beta1: .0
     beta2: .999
-batch: 128
+batch: 200
+val_batch: 50
 epoch: 200
 lr: 0.05
 lr_schedule:

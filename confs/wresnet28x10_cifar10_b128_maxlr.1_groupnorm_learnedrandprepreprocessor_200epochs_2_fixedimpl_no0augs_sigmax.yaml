@@ -1,5 +1,6 @@
 model:
   type: wresnet28_10
+  groupnorm: true
 dataset: cifar10
 cutout: 16
 aug: default

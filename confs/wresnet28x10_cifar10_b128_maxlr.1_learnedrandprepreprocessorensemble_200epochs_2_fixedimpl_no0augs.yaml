@@ -5,7 +5,7 @@ cutout: 16
 aug: default
 
 preprocessor:
-  type: learned_random_randaugmentspace
+  type: learned_random_randaugmentspace_ensemble
   entropy_alpha: 0.
   hidden_dim: 100
   scale_entropy_alpha: .0
@@ -18,7 +18,7 @@ preprocessor:
   importance_sampling: false
   label_smoothing_rate: .0
   possible_num_sequential_transforms: [1,2,3,4]
-  sigmax_dist: true
+  sigmax_dist: false
 
 alignment_loss:
   summation: standard
