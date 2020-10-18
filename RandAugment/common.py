@@ -1,5 +1,6 @@
 import logging
 import warnings
+import random
 import torch
 from backpack import memory_cleanup
 from torch.utils.checkpoint import check_backward_validity, detach_variable, get_device_states, set_device_states
@@ -173,4 +174,17 @@ class LogExpSoftmaxImpl(torch.autograd.Function):
 
 def log_exploresoftmax(logits, d):
     return LogExpSoftmaxImpl.apply(logits, d) # was tested against AD
+
+def ListDataLoader(*lists, bs=None):
+    num_elements = len(lists[0])
+    num_shown = 0
+    assert all(len(l) == num_elements for l in lists)
+    assert bs is not None
+    zipped_lists = list(zip(*lists))
+    while True:
+        if num_shown > num_elements:
+            raise StopIteration
+        batch = random.choices(zipped_lists,k=bs)
+        num_shown += bs
+        yield list(zip(*batch))
 

@@ -5,7 +5,7 @@ from abc import abstractmethod, ABCMeta
 from torchvision import transforms
 from RandAugment import google_augmentations, augmentations
 from RandAugment.networks.convnet import SeqConvNet
-from RandAugment.common import sigmax, log_sigmax, exploresoftmax, log_exploresoftmax
+from RandAugment.common import sigmax, log_sigmax, exploresoftmax, log_exploresoftmax, replace_parameters, recursive_backpack_memory_cleanup, ListDataLoader
 
 from copy import deepcopy
 import random
@@ -373,6 +373,7 @@ class RandAugmentationSampler(nn.Module):
             aug_logits = self.aug_logits # num_ops
             aug_ps = torch.sigmoid(aug_logits)
             keep = torch.bernoulli(aug_ps[augmentation_inds]) # num_samples x max_num_seq_trans
+            self.keep = keep
             aug_logps = self.get_aug_logps(keep, augmentation_inds, augmentation_mask) # num_samples x max_num_seq_trans
             augmentation_inds[keep == 0.0] = 0
             log_ps_of_sampled_scales[keep == 0.0] = 0.0
@@ -391,12 +392,16 @@ class RandAugmentationSampler(nn.Module):
 
         scale_logits[augmentation_mask] = 0.
 
+        logp = numaug_logps + scale_logps.sum(1)
+        entropy = self.get_numaug_entropy()+self.get_scale_distribution()
         if self.aug_logits is not None:
             assert keep is not None
             aug_logps = self.get_aug_logps(keep, augmentation_inds, augmentation_mask)
             scale_logps[keep == 0.0] = 0.0
+            logp += aug_logps
+            entropy += self.get_augprob_entropy()
 
-        return numaug_logps + scale_logps.sum(1) + aug_logps
+        return logp, entropy
 
     def get_scale_logps(self, sampled_scales, scale_logits):
         log_p_scale = self.log_dist(scale_logits, 2)
@@ -443,6 +448,10 @@ class RandAugmentationSampler(nn.Module):
                                    (self.log_p_num_transforms * (self.p_num_transforms != 0.))).mean()
         return - neg_entropy
 
+    def get_augprob_entropy(self):
+        d = torch.distributions.Bernoulli(logits=self.aug_logits)
+        return d.entropy().sum()
+
     def get_scale_entropy(self):
         log_p_scale = self.log_dist(self.scale_logits, 2)
         p_scale = self.dist(self.scale_logits, 2)
@@ -468,12 +477,13 @@ def update(model: RandAugmentationSampler, opt, all_rewards, ent_alpha):
 
 
     for _ in range(epochs):
-        data_loader = torch.utils.data.DataLoader(
-            torch.utils.data.TensorDataset(model.imgs, model.augmentation_inds, model.sampled_numaug_indices, model.augmentation_mask, model.sampled_scales, model.keep, all_rewards), batch_size=32,shuffle=True,drop_last=True)
-        for imgs, augmentation_inds, sampled_numaug_indices, augmentation_mask, sampled_scales, rewards in data_loader:
+        #data_loader = torch.utils.data.DataLoader(
+        #    torch.utils.data.TensorDataset(model.imgs, model.augmentation_inds, model.sampled_numaug_indices, model.augmentation_mask, model.sampled_scales, model.keep, model.logps, all_rewards), batch_size=32,shuffle=True,drop_last=True)
+        data_loader = ListDataLoader(model.imgs, model.augmentation_inds, model.sampled_numaug_indices, model.augmentation_mask, model.sampled_scales, model.keep, model.logps, all_rewards, bs=32)
+        for imgs, augmentation_inds, sampled_numaug_indices, augmentation_mask, sampled_scales, keep, old_logprobs, rewards in data_loader:
             with torch.autograd.set_detect_anomaly(True):
                 # Evaluating old actions and values :
-                logprobs, state_values, dist_entropy = model.evaluate(imgs,augmentation_inds,sampled_numaug_indices, augmentation_mask, sampled_scales,)
+                logprobs, dist_entropy = model.evaluate(imgs,augmentation_inds,sampled_numaug_indices, augmentation_mask, sampled_scales,keep=keep)
 
                 # Finding the ratio (pi_theta / pi_theta__old):
                 ratios = torch.exp(logprobs - old_logprobs)
@@ -481,10 +491,10 @@ def update(model: RandAugmentationSampler, opt, all_rewards, ent_alpha):
                     continue
 
                 # Finding Surrogate Loss:
-                advantages = rewards - state_values.detach()
+                advantages = rewards - 0. # no baseline :/
                 surr1 = ratios * advantages
                 surr2 = torch.clamp(ratios, 1 - eps_clip, 1 + eps_clip) * advantages
-                loss = -torch.min(surr1, surr2) + 0.5 * mse_loss(state_values, rewards) - ent_alpha * dist_entropy.sum(1)
+                loss = -torch.min(surr1, surr2) - ent_alpha * dist_entropy.sum(1) # + 0.5 * mse_loss(state_values, rewards)
 
                 # take gradient step
                 opt.zero_grad()
@@ -586,7 +596,7 @@ class LearnedRandAugmentPreprocessor(ImagePreprocessor):
                  importance_sampling=False, cutout=0, normalize_reward=True, model_for_online_tests=None,
                  D_out=10, q_zero_init=True, q_residual=False, scale_embs_zero_init=False, scale_embs_zero_strength_bias=0., label_smoothing_rate=0.,
                  possible_num_sequential_transforms=[1,2,3,4], sigmax_dist=False, exploresoftmax_dist=False, use_images_for_sampler=False, uniaug_val=False, old_preprocessor_val=False, current_preprocessor_val=False,
-                 aug_probs=False, use_non_embedding_sampler=False, summary_prefix='', **kwargs):
+                 aug_probs=False, use_non_embedding_sampler=False, ppo=False, summary_prefix='', **kwargs):
         super().__init__(**kwargs)
         print('using learned preprocessor')
 
@@ -610,6 +620,7 @@ class LearnedRandAugmentPreprocessor(ImagePreprocessor):
         self.agumentation_sampler_copies = []
         self.bs = bs
         self.val_bs = val_bs
+        self.ppo = ppo
 
         self.normalize_reward = normalize_reward
         self.optimizer = optimizer_creator(self.augmentation_sampler.parameters())
@@ -709,19 +720,26 @@ class LearnedRandAugmentPreprocessor(ImagePreprocessor):
             weights = self.compute_weights(rewards).detach().to(self.device)
 
         aug_sampler.zero_grad()
-        loss = -aug_sampler.logps @ weights.detach() / float(len(weights))
-        if self.entropy_alpha:
-            ent = aug_sampler.get_numaug_entropy()
-            loss -= self.entropy_alpha * ent
-        if self.scale_entropy_alpha:
-            ent = aug_sampler.get_scale_entropy()
-            loss -= self.scale_entropy_alpha * ent
+        if self.ppo:
+            replace_parameters(self.optimizer, self.augmentation_sampler.parameters(), aug_sampler.parameters())
+            update(aug_sampler, self.optimizer, weights, self.entropy_alpha)
+            recursive_backpack_memory_cleanup(aug_sampler)
+            self.sampler.load_state_dict(aug_sampler.state_dict())
+            replace_parameters(self.optimizer, aug_sampler.parameters(), self.augmentation_sampler.parameters())
+        else:
+            loss = -aug_sampler.logps @ weights.detach() / float(len(weights))
+            if self.entropy_alpha:
+                ent = aug_sampler.get_numaug_entropy()
+                loss -= self.entropy_alpha * ent
+            if self.scale_entropy_alpha:
+                ent = aug_sampler.get_scale_entropy()
+                loss -= self.scale_entropy_alpha * ent
 
-        loss.backward()
-        torch.nn.utils.clip_grad_value_(aug_sampler.parameters(), 5.)
-        self.augmentation_sampler.zero_grad()
-        self.augmentation_sampler.add_grad_of_copy(aug_sampler)
-        self.optimizer.step()
+            loss.backward()
+            torch.nn.utils.clip_grad_value_(aug_sampler.parameters(), 5.)
+            self.augmentation_sampler.zero_grad()
+            self.augmentation_sampler.add_grad_of_copy(aug_sampler)
+            self.optimizer.step()
         del aug_sampler
         if self.old_preprocessor_val:
             self.num_model_updates += 1

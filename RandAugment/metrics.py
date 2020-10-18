@@ -52,6 +52,9 @@ class Accumulator:
     def __setitem__(self, key, value):
         self.metrics[key] = value
 
+    def __contains__(self, item):
+        return self.metrics.__contains__(item)
+
     def get_dict(self):
         return copy.deepcopy(dict(self.metrics))
 
