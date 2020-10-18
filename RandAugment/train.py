@@ -31,14 +31,37 @@ from RandAugment.lr_scheduler import adjust_learning_rate_resnet
 from RandAugment.metrics import accuracy, Accumulator
 from RandAugment.networks import get_model, num_class
 from RandAugment.preprocessors import LearnedPreprocessorRandaugmentSpace, StandardCIFARPreprocessor, LearnedRandAugmentPreprocessor, LearnedPreprocessorEnsemble
+from RandAugment.differentiable_preprocessor import DifferentiableLearnedPreprocessor
 from warmup_scheduler import GradualWarmupScheduler
 from RandAugment import google_augmentations
 
 from RandAugment.common import add_filehandler, recursive_backpack_memory_cleanup
 
 logger = get_logger('RandAugment')
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
 
+def compute_preprocessor_gradients(model: nn.Module, preprocessor: nn.Module, old_model_parameters, loss_fn, generated_data, old_detached_generated_data, label):
+    # preprocessor should hold gradients from train step and should not receive gradients in val step
+    # model should hold recent gradients from val step
+
+    current_model_parameters = model.state_dict()
+    model.load_state_dict(old_model_parameters)
+    eps = 0.01/torch.sqrt(sum([p.grad.square().sum() for p in model.parameters()]))
+
+    for p in model.parameters():
+        with torch.no_grad():
+            p -= p.grad * eps
+
+    preds = model(old_detached_generated_data)
+    loss = loss_fn(preds, label)
+    old_detached_generated_data.grad -= torch.autograd.grad(loss,old_detached_generated_data)[0]# negative for finite difference
+
+    torch.autograd.backward(generated_data,-old_detached_generated_data.grad/eps) # maybe multiply with learning rate?
+
+    model.load_state_dict(current_model_parameters)
+
+    # Now the preprocessor gradients hold the estimated meta gradient and the weights are left as is
+    # The model holds the weights from before and the gradients are left as is
 
 def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='', epoch=0, writer=None, verbose=1, scheduler=None, preprocessor=None,sec_optimizer=None):
     tqdm_disable = bool(os.environ.get('TASK_NAME', ''))    # KakaoBrain Environment
@@ -77,10 +100,11 @@ def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='
     torch.cuda.empty_cache()
     print('mem usage', resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
     has_val_steps = C.get().get('alignment_loss', {}).get('has_val_steps', False)
+    finite_difference_loss = C.get().get('finite_difference_loss', {})
+    if finite_difference_loss: has_val_steps = True
     for batch in logging_loader: # logging loader might be a loader or a loader wrapped into tqdm
         data, label = batch[:2]
         steps += 1
-
 
         if preprocessor:
             data = [torchvision.transforms.ToPILImage()(ti) for ti in data]
@@ -90,16 +114,22 @@ def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='
         else:
             data, label = data.cuda(), label.cuda()
 
+        if optimizer and finite_difference_loss:
+            if steps % 2 == 1:
+                # train step
+                old_parameters = model.state_dict()
+                old_generated_data = data
+                data = old_generated_data.detach().requires_grad_()
+                old_detached_generated_data = data
+                old_label = label
+
         if optimizer:
             optimizer.zero_grad()
-            #for p in model.parameters(): p.grad = None
 
         recursive_backpack_memory_cleanup(model)
         preds = model(data)
         if 'test' in desc_default:
             recursive_backpack_memory_cleanup(model)
-        # print([p for p in model.parameters() if p.device != torch.device('cuda:0')])
-        # print([p for p in model.buffers() if p.device != torch.device('cuda:0')])
         loss = loss_fn(preds, label)
         #print('mem usage before backward', torch.cuda.memory_allocated()/1000//1000, "MB")
         val_batch = C.get().get('val_batch',0)
@@ -160,11 +190,15 @@ def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='
                 loss.backward()
                 ga = None
 
+            if finite_difference_loss and steps % 2 == 0: # eval step
+                compute_preprocessor_gradients(model, preprocessor, old_parameters, loss_fn, old_generated_data,
+                                               old_detached_generated_data, old_label)
+                call_attr_on_meta_modules('step', ga)
             if ga is not None:
                 call_attr_on_meta_modules('step',ga)
             if C.get()['optimizer'].get('clip', 5) > 0:
                 nn.utils.clip_grad_norm_(model.parameters(), C.get()['optimizer'].get('clip', 5))
-            if steps % C.get().get('step_optimizer_every', 1) == 0:
+            if (steps-1) % C.get().get('step_optimizer_every', 1) == 0:
                 optimizer.step()
                 if sec_optimizer is not None:
                     sec_optimizer.step()
@@ -176,6 +210,8 @@ def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='
             'top1': top1.item() * len(data),
             'top5': top5.item() * len(data),
         })
+        if steps % 2 == 0:
+            metrics.add('eval_top1', top1.item() * len(data))
         cnt += len(data)
         if verbose:
             postfix = metrics / cnt
@@ -195,6 +231,8 @@ def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='
             logger.info('[%s %03d/%03d] %s', desc_default, epoch, C.get()['epoch'], metrics / cnt)
 
     metrics /= cnt
+    if 'eval_top1' in metrics:
+        metrics['eval_top1'] *= 2. # because it is only recorded every second step
     if optimizer:
         metrics.metrics['lr'] = optimizer.param_groups[0]['lr']
     if verbose:
@@ -288,7 +326,7 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
     if 'preprocessor' in C.get():
         preprocessor_flags = C.get()['preprocessor']
         preprocessor_type = C.get()['preprocessor']['type']
-        if preprocessor_type in ('learned_randaugmentspace','learned_random_randaugmentspace','learned_random_randaugmentspace_ensemble'):
+        if preprocessor_type in ('learned_randaugmentspace','learned_random_randaugmentspace','learned_random_randaugmentspace_ensemble','learned_1x1conv'):
             importance_sampling = False
             assert not preprocessor_flags.get('online_tests_on_model')
             extra_kwargs = {}
@@ -299,30 +337,38 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
                                     'learned_random_randaugmentspace': LearnedRandAugmentPreprocessor,
                                     'learned_random_randaugmentspace_ensemble': LearnedPreprocessorEnsemble}
 
-            image_preprocessor =  preprocessor_classes[preprocessor_type](dataset_info,
-                                                                          preprocessor_flags['hidden_dim'],
-                                                                          get_meta_optimizer_factory(),
-                                                                          C.get()['batch'],val_bs,
-                                                                          entropy_alpha=preprocessor_flags['entropy_alpha'],
-                                                                          scale_entropy_alpha=preprocessor_flags['scale_entropy_alpha'],
-                                                                          cutout=C.get().get('cutout', 0),
-                                                                          importance_sampling=importance_sampling,
-                                                                          normalize_reward=preprocessor_flags.get('normalize_reward',True),
-                                                                          model_for_online_tests=None,
-                                                                          q_zero_init=preprocessor_flags['q_zero_init'],
-                                                                          scale_embs_zero_init=preprocessor_flags.get('scale_embs_zero_init',False),
-                                                                          scale_embs_zero_strength_bias=preprocessor_flags.get('scale_embs_zero_strength_bias',0.),
-                                                                          q_residual=preprocessor_flags.get('q_residual',False),
-                                                                          label_smoothing_rate=preprocessor_flags.get('label_smoothing_rate',0.),
-                                                                          device=torch.device(rank if worldsize > 1 else 'cuda:0'), sigmax_dist=preprocessor_flags['sigmax_dist'], exploresoftmax_dist=preprocessor_flags['exploresoftmax_dist'],
-                                                                          use_images_for_sampler=preprocessor_flags['use_images_for_sampler'],
-                                                                          summary_writer=writers[0],
-                                                                          uniaug_val=preprocessor_flags['uniaug_val'],
-                                                                          old_preprocessor_val=preprocessor_flags['oldpreprocessor_val'],
-                                                                          current_preprocessor_val=preprocessor_flags.get('currpreprocessor_val', False),
-                                                                          aug_probs=preprocessor_flags.get('aug_probs', False),
-                                                                          use_non_embedding_sampler=preprocessor_flags.get('non_embedding_sampler',False),
-                                                                          **extra_kwargs)
+            if preprocessor_type in preprocessor_classes:
+                image_preprocessor =  preprocessor_classes[preprocessor_type](dataset_info,
+                                                                              preprocessor_flags['hidden_dim'],
+                                                                              get_meta_optimizer_factory(),
+                                                                              C.get()['batch'],val_bs,
+                                                                              entropy_alpha=preprocessor_flags['entropy_alpha'],
+                                                                              scale_entropy_alpha=preprocessor_flags['scale_entropy_alpha'],
+                                                                              cutout=C.get().get('cutout', 0),
+                                                                              importance_sampling=importance_sampling,
+                                                                              normalize_reward=preprocessor_flags.get('normalize_reward',True),
+                                                                              model_for_online_tests=None,
+                                                                              q_zero_init=preprocessor_flags['q_zero_init'],
+                                                                              scale_embs_zero_init=preprocessor_flags.get('scale_embs_zero_init',False),
+                                                                              scale_embs_zero_strength_bias=preprocessor_flags.get('scale_embs_zero_strength_bias',0.),
+                                                                              q_residual=preprocessor_flags.get('q_residual',False),
+                                                                              label_smoothing_rate=preprocessor_flags.get('label_smoothing_rate',0.),
+                                                                              device=torch.device(rank if worldsize > 1 else 'cuda:0'), sigmax_dist=preprocessor_flags['sigmax_dist'], exploresoftmax_dist=preprocessor_flags['exploresoftmax_dist'],
+                                                                              use_images_for_sampler=preprocessor_flags['use_images_for_sampler'],
+                                                                              summary_writer=writers[0],
+                                                                              uniaug_val=preprocessor_flags['uniaug_val'],
+                                                                              old_preprocessor_val=preprocessor_flags['oldpreprocessor_val'],
+                                                                              current_preprocessor_val=preprocessor_flags.get('currpreprocessor_val', False),
+                                                                              aug_probs=preprocessor_flags.get('aug_probs', False),
+                                                                              use_non_embedding_sampler=preprocessor_flags.get('non_embedding_sampler',False),
+                                                                              ppo=preprocessor_flags.get('ppo',False),
+                                                                              **extra_kwargs)
+            else:
+                image_preprocessor = DifferentiableLearnedPreprocessor(dataset_info,hidden_dimension=preprocessor_flags['hidden_dim'],
+                                                                       optimizer_creator=get_meta_optimizer_factory(),
+                                                                       cutout=C.get().get('cutout', 0),
+                                                                       uniaug_val=preprocessor_flags['uniaug_val'],
+                                                                       old_preprocessor_val=preprocessor_flags['oldpreprocessor_val'])
 
         elif preprocessor_type == 'standard_cifar':
             image_preprocessor = StandardCIFARPreprocessor(dataset_info, C.get().get('cutout', 0))
