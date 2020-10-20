@@ -176,13 +176,18 @@ def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_
                         s.set_epoch(*args, **kwargs)
             train_sampler = SamplerWrapper(tra_sampler, val_sampler)
     elif 'different_trainloader_for_val' in C.get():
+        tl_settings = C.get()['different_trainloader_for_val']
+        if isinstance(tl_settings, dict):
+            val_bs = tl_settings.get('val_bs', batch)
+        else:
+            val_bs = batch
         trainloader = RoundRobinDataLoader(
             torch.utils.data.DataLoader(
                 total_trainset, batch_size=batch, shuffle=train_sampler is None, num_workers=1 if distributed else 32,
                 pin_memory=True,
                 sampler=train_sampler, drop_last=True),
             torch.utils.data.DataLoader(
-                total_trainset, batch_size=batch, shuffle=train_sampler is None, num_workers=1 if distributed else 32,
+                total_trainset, batch_size=val_bs, shuffle=train_sampler is None, num_workers=1 if distributed else 32,
                 pin_memory=True,
                 sampler=train_sampler, drop_last=True)
         )
