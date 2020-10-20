@@ -12,6 +12,7 @@ from RandAugment.networks.wideresnet import WideResNet
 from RandAugment.networks.shakeshake.shake_resnext import ShakeResNeXt
 from RandAugment.networks.convnet import SeqConvNet
 from RandAugment.networks.mlp import MLP
+from RandAugment.common import apply_weightnorm
 
 from RandAugment.meta_state_adaption import AdaptiveDropouter, Modulator
 
@@ -77,6 +78,10 @@ def get_model(conf, bs, val_bs, optimizer_creator_factory, num_class=10, writer=
         model = PyramidNet('cifar10', depth=conf['depth'], alpha=conf['alpha'], num_classes=num_class, bottleneck=conf['bottleneck'])
     else:
         raise NameError('no model named, %s' % name)
+
+    if conf.get('weight_norm', False):
+        print('Using weight norm.')
+        apply_weightnorm(model)
 
     #model = model.cuda()
     #model = DataParallel(model)

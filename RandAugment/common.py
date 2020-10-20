@@ -227,5 +227,11 @@ def copy_and_replace_transform(ds: Union[CIFAR10, ImageFolder], transform):
     new_ds.transform = transform
     return new_ds
 
+def apply_weightnorm(nn):
+    def apply_weightnorm_(module):
+        if 'Linear' in type(module).__name__ or 'Conv' in type(module).__name__:
+            torch.nn.utils.weight_norm(module, name='weight', dim=0)
+    nn.apply(apply_weightnorm_)
+
 
 
