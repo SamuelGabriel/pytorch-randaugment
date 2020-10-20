@@ -210,7 +210,6 @@ class RoundRobinDataLoader:
 
     def __next__(self):
         iterator_idx = self.steps % len(self.iterators)
-        print(iterator_idx)
         try:
             b = next(self.iterators[iterator_idx])
         except StopIteration:

@@ -194,13 +194,11 @@ def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='
                 compute_preprocessor_gradients(model, preprocessor, old_parameters, loss_fn, old_generated_data,
                                                old_detached_generated_data, old_label)
                 call_attr_on_meta_modules('step', ga)
-                print('step preprocessor')
             if ga is not None:
                 call_attr_on_meta_modules('step',ga)
             if C.get()['optimizer'].get('clip', 5) > 0:
                 nn.utils.clip_grad_norm_(model.parameters(), C.get()['optimizer'].get('clip', 5))
             if (steps-1) % C.get().get('step_optimizer_every', 1) == 0:
-                print('take optimizer step')
                 optimizer.step()
                 if sec_optimizer is not None:
                     sec_optimizer.step()
@@ -214,7 +212,6 @@ def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='
         })
         if steps % 2 == 0:
             metrics.add('eval_top1', top1.item() * len(data) * 2) # times 2 since it is only recorded every sec step
-            print('add eval top1')
         cnt += len(data)
         if verbose:
             postfix = metrics / cnt
