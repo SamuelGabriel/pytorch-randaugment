@@ -629,6 +629,7 @@ class LearnedRandAugmentPreprocessor(ImagePreprocessor):
         self.importance_sampling = importance_sampling
         self.possible_num_sequential_transforms = possible_num_sequential_transforms
         self.uniaug_val = uniaug_val
+        self.aug_probs = aug_probs
         self.old_preprocessor_val = old_preprocessor_val
         if self.old_preprocessor_val:
             self.old_preprossors = [deepcopy(self.augmentation_sampler)]
@@ -647,7 +648,8 @@ class LearnedRandAugmentPreprocessor(ImagePreprocessor):
                 num_transf = self.possible_num_sequential_transforms[random.randint(0,len(self.possible_num_sequential_transforms)-1)]
                 transforms = []
                 for t_i in range(num_transf):
-                    transforms.append((random.randint(0,self.num_transforms-1), random.randint(0,google_augmentations.PARAMETER_MAX)))
+                    if not self.aug_probs or random.random() > .5:
+                        transforms.append((random.randint(0,self.num_transforms-1), random.randint(0,google_augmentations.PARAMETER_MAX)))
                 return transforms
             return [uni_aug_augmentations() for i in imgs]
         elif self.current_preprocessor_val:

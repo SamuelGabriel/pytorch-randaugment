@@ -1,19 +1,19 @@
 import logging
 import os
+import random
 
 import torchvision
 from PIL import Image
 
 from torch.utils.data import SubsetRandomSampler, Sampler
 from torch.utils.data.distributed import DistributedSampler
-from torch.utils.data.dataset import ConcatDataset
+from torch.utils.data.dataset import ConcatDataset, Subset
 from torchvision.transforms import transforms
 from sklearn.model_selection import StratifiedShuffleSplit
 from theconf import Config as C
 
 from RandAugment.augmentations import *
-from RandAugment.common import get_logger
-from RandAugment.imagenet import ImageNet
+from RandAugment.common import get_logger, RoundRobinDataLoader, copy_and_replace_transform
 from RandAugment.dataset.noised_cifar10 import NoisedCIFAR10, TargetNoisedCIFAR10
 
 from RandAugment.augmentations import Lighting
@@ -114,6 +114,13 @@ def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_
     else:
         raise ValueError('invalid dataset name=%s' % dataset)
 
+    if 'throwaway_share_of_ds' in C.get():
+        share = C.get()['throwaway_share_of_ds']
+        indices = list(range(len(total_trainset)))
+        random.shuffle(indices)
+        train_subset_inds = indices[:int((1.-share) * len(total_trainset))]
+        total_trainset = Subset(total_trainset, train_subset_inds)
+
     train_sampler = None
     if split > 0.0:
         sss = StratifiedShuffleSplit(n_splits=5, test_size=split, random_state=0)
@@ -130,12 +137,56 @@ def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_
         assert split == 0.0, "Split not supported for distributed training."
         train_sampler = DistributedSampler(total_trainset)
         test_sampler = DistributedSampler(testset, shuffle=False)
+        test_train_sampler = DistributedSampler(total_trainset, shuffle=False)
     else:
         test_sampler = None
+        test_train_sampler = None
 
     if 'adaptive_trainloader' in C.get():
         val_bs = C.get().get('val_batch',0)
         trainloader = AdaptiveLoaderByLabel(total_trainset, get_meta_optimizer_factory(), batch-val_bs, val_bs, summary_writer=summary_writer)
+    elif 'val_step_trainloader_val_share' in C.get():
+        share = C.get()['val_step_trainloader_val_share']
+        indices = list(range(len(total_trainset)))
+        random.shuffle(indices)
+        val_subset_inds, train_subset_inds = indices[:int(share*len(total_trainset))], indices[int(share*len(total_trainset)):]
+        val_ds, train_ds = Subset(total_trainset, val_subset_inds), Subset(total_trainset, train_subset_inds)
+        if distributed:
+            tra_sampler, val_sampler = DistributedSampler(train_ds), DistributedSampler(val_ds)
+        else:
+            tra_sampler = val_sampler = None
+        trainloader = RoundRobinDataLoader(
+            torch.utils.data.DataLoader(
+                train_ds, batch_size=batch, shuffle=tra_sampler is None, num_workers=1 if distributed else 32,
+                pin_memory=True,
+                sampler=tra_sampler, drop_last=True),
+            torch.utils.data.DataLoader(
+                val_ds, batch_size=batch, shuffle=val_sampler is None, num_workers=1 if distributed else 32,
+                pin_memory=True,
+                sampler=val_sampler, drop_last=True)
+        )
+        if distributed:
+            # will be used to step later
+            class SamplerWrapper:
+                def __init__(self, *samplers):
+                    self.samplers = samplers
+
+                def set_epoch(self, *args, **kwargs):
+                    for s in self.samplers:
+                        s.set_epoch(*args, **kwargs)
+            train_sampler = SamplerWrapper(tra_sampler, val_sampler)
+    elif 'different_trainloader_for_val' in C.get():
+        trainloader = RoundRobinDataLoader(
+            torch.utils.data.DataLoader(
+                total_trainset, batch_size=batch, shuffle=train_sampler is None, num_workers=1 if distributed else 32,
+                pin_memory=True,
+                sampler=train_sampler, drop_last=True),
+            torch.utils.data.DataLoader(
+                total_trainset, batch_size=batch, shuffle=train_sampler is None, num_workers=1 if distributed else 32,
+                pin_memory=True,
+                sampler=train_sampler, drop_last=True)
+        )
+
     else:
         trainloader = torch.utils.data.DataLoader(
             total_trainset, batch_size=batch, shuffle=train_sampler is None, num_workers=1 if distributed else 32, pin_memory=True,
@@ -148,7 +199,13 @@ def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_
         testset, batch_size=batch, shuffle=False, num_workers=1 if distributed else 32, pin_memory=True,
         drop_last=False, sampler=test_sampler
     )
-    return train_sampler, trainloader, validloader, testloader, dataset_info
+    # We use this 'hacky' solution s.t. we do not need to keep the dataset twice in memory.
+    test_total_trainset = copy_and_replace_transform(total_trainset, transform_test)
+    test_trainloader = torch.utils.data.DataLoader(
+        test_total_trainset, batch_size=batch, shuffle=False, num_workers=1 if distributed else 32, pin_memory=True,
+        drop_last=False, sampler=test_train_sampler
+    )
+    return train_sampler, trainloader, validloader, testloader, test_trainloader, dataset_info
 
 
 class SubsetSampler(Sampler):

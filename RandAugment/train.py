@@ -194,11 +194,13 @@ def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='
                 compute_preprocessor_gradients(model, preprocessor, old_parameters, loss_fn, old_generated_data,
                                                old_detached_generated_data, old_label)
                 call_attr_on_meta_modules('step', ga)
+                print('step preprocessor')
             if ga is not None:
                 call_attr_on_meta_modules('step',ga)
             if C.get()['optimizer'].get('clip', 5) > 0:
                 nn.utils.clip_grad_norm_(model.parameters(), C.get()['optimizer'].get('clip', 5))
             if (steps-1) % C.get().get('step_optimizer_every', 1) == 0:
+                print('take optimizer step')
                 optimizer.step()
                 if sec_optimizer is not None:
                     sec_optimizer.step()
@@ -211,7 +213,8 @@ def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='
             'top5': top5.item() * len(data),
         })
         if steps % 2 == 0:
-            metrics.add('eval_top1', top1.item() * len(data))
+            metrics.add('eval_top1', top1.item() * len(data) * 2) # times 2 since it is only recorded every sec step
+            print('add eval top1')
         cnt += len(data)
         if verbose:
             postfix = metrics / cnt
@@ -231,8 +234,6 @@ def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='
             logger.info('[%s %03d/%03d] %s', desc_default, epoch, C.get()['epoch'], metrics / cnt)
 
     metrics /= cnt
-    if 'eval_top1' in metrics:
-        metrics['eval_top1'] *= 2. # because it is only recorded every second step
     if optimizer:
         metrics.metrics['lr'] = optimizer.param_groups[0]['lr']
     if verbose:
@@ -250,7 +251,7 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
         logger.warning('tag not provided or rank > 0 -> no tensorboard log.')
     else:
         from tensorboardX import SummaryWriter
-    writers = [SummaryWriter(log_dir='./logs3/%s/%s' % (tag, x)) for x in ['train', 'valid', 'test']]
+    writers = [SummaryWriter(log_dir='./logs3/%s/%s' % (tag, x)) for x in ['train', 'valid', 'test', 'testtrain']]
 
     def get_meta_optimizer_factory():
         meta_flags = C.get().get('meta_opt',{})
@@ -279,7 +280,7 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
     google_augmentations.set_search_space(C.get().get('augmentation_search_space','standard'))
     max_epoch = C.get()['epoch']
     val_bs = C.get().get('val_batch',0)
-    trainsampler, trainloader, validloader, testloader_, dataset_info = get_dataloaders(C.get()['dataset'], C.get()['batch']+val_bs, dataroot, test_ratio, split_idx=cv_fold, get_meta_optimizer_factory=get_meta_optimizer_factory, distributed=worldsize>1, summary_writer=writers[0])
+    trainsampler, trainloader, validloader, testloader_, testtrainloader_, dataset_info = get_dataloaders(C.get()['dataset'], C.get()['batch']+val_bs, dataroot, test_ratio, split_idx=cv_fold, get_meta_optimizer_factory=get_meta_optimizer_factory, distributed=worldsize>1, summary_writer=writers[0])
 
     # create a model & an optimizer
     model = get_model(C.get()['model'], C.get()['batch'], val_bs, get_meta_optimizer_factory, num_class(C.get()['dataset']), writer=writers[0])
@@ -338,7 +339,7 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
                                     'learned_random_randaugmentspace_ensemble': LearnedPreprocessorEnsemble}
 
             if preprocessor_type in preprocessor_classes:
-                image_preprocessor =  preprocessor_classes[preprocessor_type](dataset_info,
+                image_preprocessor = preprocessor_classes[preprocessor_type](dataset_info,
                                                                               preprocessor_flags['hidden_dim'],
                                                                               get_meta_optimizer_factory(),
                                                                               C.get()['batch'],val_bs,
@@ -439,13 +440,14 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
 
         if epoch % 5 == 0 or epoch == max_epoch:
             with torch.no_grad():
-                #rs['valid'] = run_epoch(rank, worldsize, model, validloader, criterion, None, desc_default='valid', epoch=epoch, writer=writers[1], verbose=True, preprocessor=image_preprocessor)
+                rs['testtrain'] = run_epoch(rank, worldsize, model, testtrainloader_, criterion, None, desc_default='testtrain', epoch=epoch, writer=writers[3], verbose=True, preprocessor=image_preprocessor)
                 rs['test'] = run_epoch(rank, worldsize, model, testloader_, criterion, None, desc_default='*test', epoch=epoch, writer=writers[2], verbose=True, preprocessor=image_preprocessor)
+
 
             if metric == 'last' or rs[metric]['top1'] > best_top1:
                 if metric != 'last':
                     best_top1 = rs[metric]['top1']
-                for key, setname in itertools.product(['loss', 'top1', 'top5'], ['train', 'test']):
+                for key, setname in itertools.product(['loss', 'top1', 'top5'], ['train', 'test', 'testtrain']):
                     result['%s_%s' % (key, setname)] = rs[setname][key]
                 result['epoch'] = epoch
 

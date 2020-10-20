@@ -1,9 +1,13 @@
 import logging
 import warnings
 import random
+from copy import copy
+from typing import Union
+
 import torch
 from backpack import memory_cleanup
 from torch.utils.checkpoint import check_backward_validity, detach_variable, get_device_states, set_device_states
+from torchvision.datasets import VisionDataset, CIFAR10, CIFAR100, ImageFolder
 
 formatter = logging.Formatter('[%(asctime)s] [%(name)s] [%(levelname)s] %(message)s')
 warnings.filterwarnings("ignore", "(Possibly )?corrupt EXIF data", UserWarning)
@@ -187,4 +191,42 @@ def ListDataLoader(*lists, bs=None):
         batch = random.choices(zipped_lists,k=bs)
         num_shown += bs
         yield list(zip(*batch))
+
+class RoundRobinDataLoader:
+    def __init__(self,*dataloaders):
+        '''
+        All dataloaders are just restarted when ending, but the first one. If the first provided DataLoader ends we end.
+        WARNING: Only supports one iterator per dataloader at any given time.
+        '''
+        self.loaders = dataloaders
+
+    def __iter__(self):
+        self.iterators = [iter(l) for l in self.loaders]
+        self.steps = 0
+        return self
+
+    def __len__(self):
+        return len(self.loaders[0])*len(self.loaders)
+
+    def __next__(self):
+        iterator_idx = self.steps % len(self.iterators)
+        print(iterator_idx)
+        try:
+            b = next(self.iterators[iterator_idx])
+        except StopIteration:
+            if iterator_idx == 0:
+                raise StopIteration
+            else:
+                self.iterators[iterator_idx] = iter(self.loaders[iterator_idx])
+                b = next(self.iterators[iterator_idx])
+        self.steps += 1
+        return b
+
+def copy_and_replace_transform(ds: Union[CIFAR10, ImageFolder], transform):
+    assert ds.transform is not None # make sure still uses old style transform
+    new_ds = copy(ds)
+    new_ds.transform = transform
+    return new_ds
+
+
 
