@@ -252,7 +252,6 @@ class AdaptiveDropouter(nn.Module):
 
 class Modulator(nn.Module):
     def __init__(self, state_size, hidden_dimension, optimizer_creator, out_bias=False, relu=True, summary_writer=None):
-        assert False, 'Currently this thing is not in the graph, put it in the graph first :)'
         super().__init__()
         self.get_multiplier = nn.Sequential(
             nn.Linear(state_size,hidden_dimension,bias=False),
@@ -266,28 +265,29 @@ class Modulator(nn.Module):
 
         self.t = -1
 
+    def use_this_multiplier_once(self, m):
+        self.one_time_usage_m = m
+
     def forward(self, orig_hiddens):
-        if self.training:
-            get_multiplier = deepcopy(self.get_multiplier)
-            self.get_multiplier_copies.append(get_multiplier)
+        self.t += 1
+        if hasattr(self,'one_time_usage_m') and self.one_time_usage_m is not None:
+            r = self.one_time_usage_m * orig_hiddens
+            self.one_time_usage_m = None
+            return r
+        if self.training and self.t % 2 == 0:
+            m = self.get_multiplier(orig_hiddens.detach())
+            self.last_multipler = m
+            m = m.detach().requires_grad_()
+            self.last_multipler_detached = m
+            return m*orig_hiddens
         else:
-            assert not torch.is_grad_enabled(), "You are in inference mode of nn, but compute gradient. Not supported for this model."
-            get_multiplier = self.get_multiplier
-        m = get_multiplier(orig_hiddens)
-        return m*orig_hiddens
+            return orig_hiddens
 
     def step(self, diff_alignment):
-        assert len(self.get_multiplier_copies) <= 2
-        get_multiplier = self.get_multiplier_copies.pop(0)
-
-        for p in get_multiplier.parameters(): p.grad = None
-        grads = torch.autograd.grad(diff_alignment, get_multiplier.parameters()) # takes 1.5s for wres28x10 for bs 128
-        for g,p in zip(grads,self.get_multiplier.parameters()):
-            p.grad = g
         torch.nn.utils.clip_grad_value_(self.get_multiplier.parameters(), 5.)
         self.opt.step()
-        for p in self.get_multiplier.parameters(): p.grad = None
-        del get_multiplier, diff_alignment
+        #for p in self.get_multiplier.parameters(): p.grad = None
+        self.opt.zero_grad()
 
     def reset_state(self):
         del self.get_multiplier_copies

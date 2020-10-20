@@ -178,6 +178,14 @@ class WideResNet(nn.Module):
 
         # self.apply(conv_init)
 
+    def to(self, *args, **kwargs):
+        super().to(*args,**kwargs)
+        print(*args)
+        for ad in self.adaptive_dropouters:
+            if hasattr(ad,'to'):
+                ad.to(*args,**kwargs)
+        return self
+
     def _wide_layer(self, block, planes, num_blocks, dropout_rate, stride):
         strides = [stride] + [1]*(num_blocks-1)
         layers = []

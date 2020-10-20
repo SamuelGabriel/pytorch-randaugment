@@ -40,7 +40,7 @@ from RandAugment.common import add_filehandler, recursive_backpack_memory_cleanu
 logger = get_logger('RandAugment')
 logger.setLevel(logging.DEBUG)
 
-def compute_preprocessor_gradients(model: nn.Module, preprocessor: nn.Module, old_model_parameters, loss_fn, generated_data, old_detached_generated_data, label):
+def compute_preprocessor_gradients(model: nn.Module, meta_module: nn.Module, old_model_parameters, loss_fn, output, detached_output, old_detached_generated_data, label):
     # preprocessor should hold gradients from train step and should not receive gradients in val step
     # model should hold recent gradients from val step
 
@@ -52,11 +52,13 @@ def compute_preprocessor_gradients(model: nn.Module, preprocessor: nn.Module, ol
         with torch.no_grad():
             p -= p.grad * eps
 
+    if hasattr(meta_module, 'use_this_multiplier_once'):
+        meta_module.use_this_multiplier_once(detached_output)
     preds = model(old_detached_generated_data)
     loss = loss_fn(preds, label)
-    old_detached_generated_data.grad -= torch.autograd.grad(loss,old_detached_generated_data)[0]# negative for finite difference
+    detached_output.grad -= torch.autograd.grad(loss,detached_output)[0]# negative for finite difference
 
-    torch.autograd.backward(generated_data,-old_detached_generated_data.grad/eps) # maybe multiply with learning rate?
+    torch.autograd.backward(output,-detached_output.grad/eps) # maybe multiply with learning rate?
 
     model.load_state_dict(current_model_parameters)
 
@@ -118,10 +120,11 @@ def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='
             if steps % 2 == 1:
                 # train step
                 old_parameters = model.state_dict()
-                old_generated_data = data
-                data = old_generated_data.detach().requires_grad_()
-                old_detached_generated_data = data
                 old_label = label
+                if hasattr(preprocessor, 'step'):
+                    old_generated_data = data
+                    data = old_generated_data.detach().requires_grad_()
+                old_detached_generated_data = data
 
         if optimizer:
             optimizer.zero_grad()
@@ -191,8 +194,13 @@ def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='
                 ga = None
 
             if finite_difference_loss and steps % 2 == 0: # eval step
-                compute_preprocessor_gradients(model, preprocessor, old_parameters, loss_fn, old_generated_data,
-                                               old_detached_generated_data, old_label)
+                if hasattr(preprocessor, 'step'):
+                    compute_preprocessor_gradients(model, preprocessor, old_parameters, loss_fn, old_generated_data, old_detached_generated_data,
+                                                   old_detached_generated_data, old_label)
+                else:
+                    modulator = model.adaptive_dropouters[0]
+                    compute_preprocessor_gradients(model, modulator, old_parameters, loss_fn, modulator.last_multipler, modulator.last_multipler_detached,
+                                                   old_detached_generated_data, old_label)
                 call_attr_on_meta_modules('step', ga)
             if ga is not None:
                 call_attr_on_meta_modules('step',ga)
@@ -284,7 +292,8 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
     if worldsize > 1:
         model = DDP(model.to(rank), device_ids=[rank])
     else:
-        model = model.cuda()
+        model = model.to('cuda:0')
+
 
     criterion = nn.CrossEntropyLoss()
     if C.get()['optimizer']['type'] == 'sgd':
@@ -428,7 +437,7 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
         model.train()
         if image_preprocessor: image_preprocessor.train()
         rs = dict()
-        rs['train'] = run_epoch(rank, worldsize,extend(model) if 'meta_opt' in C.get() else model, trainloader, criterion, optimizer, desc_default='train', epoch=epoch, writer=writers[0], verbose=True, scheduler=scheduler, preprocessor=image_preprocessor, sec_optimizer=sec_optimizer)
+        rs['train'] = run_epoch(rank, worldsize,extend(model) if 'alignment_loss' in C.get() else model, trainloader, criterion, optimizer, desc_default='train', epoch=epoch, writer=writers[0], verbose=True, scheduler=scheduler, preprocessor=image_preprocessor, sec_optimizer=sec_optimizer)
         model.eval()
         if image_preprocessor: image_preprocessor.eval()
 
