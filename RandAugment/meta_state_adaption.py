@@ -274,6 +274,7 @@ class Modulator(nn.Module):
             r = self.one_time_usage_m * orig_hiddens
             self.one_time_usage_m = None
             return r
+        self.t += 1
         if self.training and self.t % 2 == 0:
             m = self.get_multiplier(orig_hiddens.detach())
             self.last_multipler = m
@@ -292,6 +293,7 @@ class Modulator(nn.Module):
     def reset_state(self):
         del self.get_multiplier_copies
         self.get_multiplier_copies = []
+        self.t = -1
 
 
 
