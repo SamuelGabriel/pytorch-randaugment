@@ -8,6 +8,7 @@ import torch
 from backpack import memory_cleanup
 from torch.utils.checkpoint import check_backward_validity, detach_variable, get_device_states, set_device_states
 from torchvision.datasets import VisionDataset, CIFAR10, CIFAR100, ImageFolder
+from torch.utils.data import Subset
 
 formatter = logging.Formatter('[%(asctime)s] [%(name)s] [%(levelname)s] %(message)s')
 warnings.filterwarnings("ignore", "(Possibly )?corrupt EXIF data", UserWarning)
@@ -40,9 +41,12 @@ def get_sum_along_batch(model, attribute):
             grad_list.append(ga)
     return torch.stack(grad_list).sum(0)
 
-def get_gradients(model):
+def get_gradients(model, copy=False):
     grad_list = []
     for param in model.parameters():
+        g = param.grad
+        if copy:
+            g = g.clone()
         grad_list.append(param.grad)
     return grad_list
 
@@ -186,8 +190,8 @@ def ListDataLoader(*lists, bs=None):
     assert bs is not None
     zipped_lists = list(zip(*lists))
     while True:
-        if num_shown > num_elements:
-            raise StopIteration
+        if num_shown >= num_elements:
+            break
         batch = random.choices(zipped_lists,k=bs)
         num_shown += bs
         yield list(zip(*batch))
@@ -221,10 +225,16 @@ class RoundRobinDataLoader:
         self.steps += 1
         return b
 
-def copy_and_replace_transform(ds: Union[CIFAR10, ImageFolder], transform):
-    assert ds.transform is not None # make sure still uses old style transform
-    new_ds = copy(ds)
-    new_ds.transform = transform
+def copy_and_replace_transform(ds: Union[CIFAR10, ImageFolder, Subset], transform):
+    assert ds.dataset.transform is not None if isinstance(ds,Subset) else ds.transform is not None # make sure still uses old style transform
+    if isinstance(ds, Subset):
+        new_super_ds = copy(ds.dataset)
+        new_super_ds.transform = transform
+        new_ds = copy(ds)
+        new_ds.dataset = new_super_ds
+    else:
+        new_ds = copy(ds)
+        new_ds.transform = transform
     return new_ds
 
 def apply_weightnorm(nn):

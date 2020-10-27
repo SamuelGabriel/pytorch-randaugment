@@ -1,6 +1,7 @@
 import logging
 import os
 import random
+from collections import Counter
 
 import torchvision
 from PIL import Image
@@ -115,10 +116,9 @@ def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_
         raise ValueError('invalid dataset name=%s' % dataset)
 
     if 'throwaway_share_of_ds' in C.get():
+        assert 'val_step_trainloader_val_share' not in C.get()
         share = C.get()['throwaway_share_of_ds']
-        indices = list(range(len(total_trainset)))
-        random.shuffle(indices)
-        train_subset_inds = indices[:int((1.-share) * len(total_trainset))]
+        train_subset_inds, _ = stratified_split(total_trainset.targets,share)
         total_trainset = Subset(total_trainset, train_subset_inds)
 
     train_sampler = None
@@ -147,9 +147,7 @@ def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_
         trainloader = AdaptiveLoaderByLabel(total_trainset, get_meta_optimizer_factory(), batch-val_bs, val_bs, summary_writer=summary_writer)
     elif 'val_step_trainloader_val_share' in C.get():
         share = C.get()['val_step_trainloader_val_share']
-        indices = list(range(len(total_trainset)))
-        random.shuffle(indices)
-        val_subset_inds, train_subset_inds = indices[:int(share*len(total_trainset))], indices[int(share*len(total_trainset)):]
+        train_subset_inds, val_subset_inds = stratified_split(total_trainset.targets,share)
         val_ds, train_ds = Subset(total_trainset, val_subset_inds), Subset(total_trainset, train_subset_inds)
         if distributed:
             tra_sampler, val_sampler = DistributedSampler(train_ds), DistributedSampler(val_ds)
@@ -228,3 +226,35 @@ class SubsetSampler(Sampler):
 
     def __len__(self):
         return len(self.indices)
+
+
+def shufflelist_with_seed(lis, seed='2020'):
+    s = random.getstate()
+    random.seed(seed)
+    random.shuffle(lis)
+    random.setstate(s)
+
+def stratified_split(labels, val_share):
+    assert isinstance(labels, list)
+    counter = Counter(labels)
+    indices_per_label = {label: [i for i,l in enumerate(labels) if l == label] for label in counter}
+    per_label_split = {}
+    for label, count in counter.items():
+        indices = indices_per_label[label]
+        assert count == len(indices)
+        shufflelist_with_seed(indices, f'2020_{label}_{count}')
+        train_val_border = round(count*(1.-val_share))
+        per_label_split[label] = (indices[:train_val_border], indices[train_val_border:])
+    final_split = ([],[])
+    for label, split in per_label_split.items():
+        for f_s, s in zip(final_split, split):
+            f_s.extend(s)
+    shufflelist_with_seed(final_split[0], '2020_yoyo')
+    shufflelist_with_seed(final_split[1], '2020_yo')
+    return final_split
+
+
+
+
+
+
