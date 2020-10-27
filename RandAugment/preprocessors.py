@@ -388,12 +388,15 @@ class RandAugmentationSampler(nn.Module):
         numaug_logps = self.get_numaug_logps(sampled_numaug_indices, num_transforms_logits)
 
         scale_logits = self.get_scale_logits(augmentation_inds,q)
+        self.scale_logits = scale_logits
+
+
         scale_logps = self.get_scale_logps(sampled_scales, scale_logits)
-
-        scale_logits[augmentation_mask] = 0.
-
+        scale_logps[augmentation_mask] = 0.
         logp = numaug_logps + scale_logps.sum(1)
-        entropy = self.get_numaug_entropy()+self.get_scale_distribution()
+        self.p_num_transforms = self.dist(num_transforms_logits, -1)
+        self.augmentation_mask = augmentation_mask
+        entropy = self.get_numaug_entropy()+self.get_scale_entropy()
         if self.aug_logits is not None:
             assert keep is not None
             aug_logps = self.get_aug_logps(keep, augmentation_inds, augmentation_mask)
@@ -471,16 +474,24 @@ class RandAugmentationSampler(nn.Module):
         return p_scale
 
 def update(model: RandAugmentationSampler, opt, all_rewards, ent_alpha):
-    mse_loss = nn.MSELoss()
     epochs = 4
     eps_clip = .2
 
-
+    data = (
+        model.imgs, model.augmentation_inds, model.sampled_numaug_indices, model.augmentation_mask, model.sampled_scales,
+        model.keep if hasattr(model, 'keep') else len(model.logps) * [None], model.logps.detach(), all_rewards)
     for _ in range(epochs):
         #data_loader = torch.utils.data.DataLoader(
         #    torch.utils.data.TensorDataset(model.imgs, model.augmentation_inds, model.sampled_numaug_indices, model.augmentation_mask, model.sampled_scales, model.keep, model.logps, all_rewards), batch_size=32,shuffle=True,drop_last=True)
-        data_loader = ListDataLoader(model.imgs, model.augmentation_inds, model.sampled_numaug_indices, model.augmentation_mask, model.sampled_scales, model.keep, model.logps, all_rewards, bs=32)
+        data_loader = ListDataLoader(*data, bs=32)
         for imgs, augmentation_inds, sampled_numaug_indices, augmentation_mask, sampled_scales, keep, old_logprobs, rewards in data_loader:
+            augmentation_inds = torch.stack(augmentation_inds)
+            sampled_numaug_indices = torch.stack(sampled_numaug_indices)
+            augmentation_mask = torch.stack(augmentation_mask)
+            sampled_scales = torch.stack(sampled_scales)
+            keep = torch.stack(keep) if keep[0] is not None else None
+            old_logprobs = torch.stack(old_logprobs)
+            rewards = torch.stack(rewards)
             with torch.autograd.set_detect_anomaly(True):
                 # Evaluating old actions and values :
                 logprobs, dist_entropy = model.evaluate(imgs,augmentation_inds,sampled_numaug_indices, augmentation_mask, sampled_scales,keep=keep)
@@ -491,14 +502,14 @@ def update(model: RandAugmentationSampler, opt, all_rewards, ent_alpha):
                     continue
 
                 # Finding Surrogate Loss:
-                advantages = rewards - 0. # no baseline :/
+                advantages = rewards # no baseline :/
                 surr1 = ratios * advantages
                 surr2 = torch.clamp(ratios, 1 - eps_clip, 1 + eps_clip) * advantages
-                loss = -torch.min(surr1, surr2) - ent_alpha * dist_entropy.sum(1) # + 0.5 * mse_loss(state_values, rewards)
+                loss = -torch.min(surr1, surr2).mean() - ent_alpha * dist_entropy # + 0.5 * mse_loss(state_values, rewards)
 
                 # take gradient step
                 opt.zero_grad()
-                loss.mean().backward()
+                loss.backward()
                 opt.step()
 
 
@@ -726,7 +737,7 @@ class LearnedRandAugmentPreprocessor(ImagePreprocessor):
             replace_parameters(self.optimizer, self.augmentation_sampler.parameters(), aug_sampler.parameters())
             update(aug_sampler, self.optimizer, weights, self.entropy_alpha)
             recursive_backpack_memory_cleanup(aug_sampler)
-            self.sampler.load_state_dict(aug_sampler.state_dict())
+            self.augmentation_sampler.load_state_dict(aug_sampler.state_dict())
             replace_parameters(self.optimizer, aug_sampler.parameters(), self.augmentation_sampler.parameters())
         else:
             loss = -aug_sampler.logps @ weights.detach() / float(len(weights))
