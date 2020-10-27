@@ -67,13 +67,16 @@ class Accumulator:
     def __truediv__(self, other):
         newone = Accumulator()
         for key, value in self.items():
-            if isinstance(other, str):
-                if other != key:
-                    newone[key] = value / self[other]
-                else:
-                    newone[key] = value
+            newone[key] = value / other
+        return newone
+
+    def divide(self, divisor, **special_divisors):
+        newone = Accumulator()
+        for key, value in self.items():
+            if key in special_divisors:
+                newone[key] = value/special_divisors[key]
             else:
-                newone[key] = value / other
+                newone[key] = value/divisor
         return newone
 
 

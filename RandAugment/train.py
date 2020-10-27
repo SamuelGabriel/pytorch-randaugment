@@ -35,18 +35,20 @@ from RandAugment.differentiable_preprocessor import DifferentiableLearnedPreproc
 from warmup_scheduler import GradualWarmupScheduler
 from RandAugment import google_augmentations
 
-from RandAugment.common import add_filehandler, recursive_backpack_memory_cleanup
+from RandAugment.common import add_filehandler, recursive_backpack_memory_cleanup, get_gradients
 
 logger = get_logger('RandAugment')
 logger.setLevel(logging.DEBUG)
 
-def compute_preprocessor_gradients(model: nn.Module, meta_module: nn.Module, old_model_parameters, loss_fn, output, detached_output, old_detached_generated_data, label):
+def compute_preprocessor_gradients(model: nn.Module, meta_module: nn.Module, old_model_parameters, loss_fn, output, detached_output, old_detached_generated_data, label, old_grads=None, lr=1.):
     # preprocessor should hold gradients from train step and should not receive gradients in val step
     # model should hold recent gradients from val step
 
     current_model_parameters = model.state_dict()
     model.load_state_dict(old_model_parameters)
-    eps = 0.01/torch.sqrt(sum([p.grad.square().sum() for p in model.parameters()]))
+
+    eps = 0.01/torch.sqrt(sum([p.grad.square().sum() for p in model.parameters()])) # at beginning of training ~.005
+    lr = lr * 1.9 # because of nesterov with .9 momentum
 
     for p in model.parameters():
         with torch.no_grad():
@@ -56,9 +58,16 @@ def compute_preprocessor_gradients(model: nn.Module, meta_module: nn.Module, old
         meta_module.use_this_multiplier_once(detached_output)
     preds = model(old_detached_generated_data)
     loss = loss_fn(preds, label)
-    detached_output.grad -= torch.autograd.grad(loss,detached_output)[0]# negative for finite difference
+    if meta_module is model:
+        (lr*loss/eps).backward()
+        for p,old_g in zip(model.parameters(),old_grads):
+            with torch.no_grad():
+                if p.requires_grad:
+                    p.grad -= lr*old_g/eps
+    else:
+        detached_output.grad -= torch.autograd.grad(loss,detached_output)[0]# negative for finite difference
 
-    torch.autograd.backward(output,-detached_output.grad/eps) # maybe multiply with learning rate?
+        torch.autograd.backward(output,-lr*detached_output.grad/eps) # maybe multiply with learning rate?
 
     model.load_state_dict(current_model_parameters)
 
@@ -75,6 +84,7 @@ def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='
 
     metrics = Accumulator()
     cnt = 0
+    eval_cnt = 0
     total_steps = len(loader)
     steps = 0
     backpack_state = {}
@@ -103,6 +113,7 @@ def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='
     print('mem usage', resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
     has_val_steps = C.get().get('alignment_loss', {}).get('has_val_steps', False)
     finite_difference_loss = C.get().get('finite_difference_loss', {})
+    model_meta_gradient = C.get().get('model_meta_gradient', False)
     if finite_difference_loss: has_val_steps = True
     for batch in logging_loader: # logging loader might be a loader or a loader wrapped into tqdm
         data, label = batch[:2]
@@ -125,6 +136,8 @@ def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='
                     old_generated_data = data
                     data = old_generated_data.detach().requires_grad_()
                 old_detached_generated_data = data
+            elif model_meta_gradient:
+                old_grads = get_gradients(model, copy=True)
 
         if optimizer:
             optimizer.zero_grad()
@@ -194,7 +207,13 @@ def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='
                 ga = None
 
             if finite_difference_loss and steps % 2 == 0: # eval step
-                if hasattr(preprocessor, 'step'):
+                if model_meta_gradient:
+                    assert not hasattr(preprocessor, 'step')
+                    compute_preprocessor_gradients(model, model, old_parameters, loss_fn, None, None,
+                                                   old_detached_generated_data, old_label, old_grads=old_grads, lr=C.get()['lr'])#optimizer.param_groups[0]['lr'])
+                    del old_grads
+
+                elif hasattr(preprocessor, 'step'):
                     compute_preprocessor_gradients(model, preprocessor, old_parameters, loss_fn, old_generated_data, old_detached_generated_data,
                                                    old_detached_generated_data, old_label)
                 else:
@@ -206,7 +225,7 @@ def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='
                 call_attr_on_meta_modules('step',ga)
             if C.get()['optimizer'].get('clip', 5) > 0:
                 nn.utils.clip_grad_norm_(model.parameters(), C.get()['optimizer'].get('clip', 5))
-            if (steps-1) % C.get().get('step_optimizer_every', 1) == 0:
+            if (steps-1) % C.get().get('step_optimizer_every', 1) == C.get().get('step_optimizer_nth_step', 0): # default is to step on the first step of each pack
                 optimizer.step()
                 if sec_optimizer is not None:
                     sec_optimizer.step()
@@ -219,10 +238,11 @@ def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='
             'top5': top5.item() * len(data),
         })
         if steps % 2 == 0:
-            metrics.add('eval_top1', top1.item() * len(data) * 2) # times 2 since it is only recorded every sec step
+            metrics.add('eval_top1', top1.item() * len(data)) # times 2 since it is only recorded every sec step
+            eval_cnt += len(data)
         cnt += len(data)
         if verbose:
-            postfix = metrics / cnt
+            postfix = metrics.divide(cnt, eval_top1=eval_cnt)
             if optimizer:
                 postfix['lr'] = optimizer.param_groups[0]['lr']
             logging_loader.set_postfix(postfix)
@@ -234,11 +254,11 @@ def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='
 
     if tqdm_disable:
         if optimizer:
-            logger.info('[%s %03d/%03d] %s lr=%.6f', desc_default, epoch, C.get()['epoch'], metrics / cnt, optimizer.param_groups[0]['lr'])
+            logger.info('[%s %03d/%03d] %s lr=%.6f', desc_default, epoch, C.get()['epoch'],  metrics.divide(cnt, eval_top1=eval_cnt), optimizer.param_groups[0]['lr'])
         else:
-            logger.info('[%s %03d/%03d] %s', desc_default, epoch, C.get()['epoch'], metrics / cnt)
+            logger.info('[%s %03d/%03d] %s', desc_default, epoch, C.get()['epoch'], metrics.divide(cnt, eval_top1=eval_cnt))
 
-    metrics /= cnt
+    metrics = metrics.divide(cnt, eval_top1=eval_cnt)
     if optimizer:
         metrics.metrics['lr'] = optimizer.param_groups[0]['lr']
     if verbose:
@@ -303,6 +323,12 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
             momentum=C.get()['optimizer'].get('momentum', 0.9),
             weight_decay=C.get()['optimizer']['decay'],
             nesterov=C.get()['optimizer']['nesterov']
+        )
+    elif C.get()['optimizer']['type'] == 'adam':
+        optimizer = optim.Adam(
+            model.parameters(),
+            lr=C.get()['lr'],
+            betas=(C.get()['optimizer'].get('momentum',.9),.999)
         )
     else:
         raise ValueError('invalid optimizer type=%s' % C.get()['optimizer']['type'])
@@ -399,6 +425,10 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
             else:
                 model.load_state_dict({k if 'module.' in k else 'module.'+k: v for k, v in data[key].items()})
             optimizer.load_state_dict(data['optimizer'])
+            if data['preprocessor'] is not None:
+                image_preprocessor.load_state_dict(data['preprocessor'])
+            else:
+                assert image_preprocessor is None
             if data['epoch'] < C.get()['epoch']:
                 epoch_start = data['epoch']
             else:
@@ -475,6 +505,7 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
                             'test': rs['test'].get_dict(),
                         },
                         'optimizer': optimizer.state_dict(),
+                        'preprocessor': None if image_preprocessor is None else image_preprocessor.state_dict(),
                         'model': model.state_dict()
                     }, save_path)
                     torch.save({
@@ -484,6 +515,7 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
                             'test': rs['test'].get_dict(),
                         },
                         'optimizer': optimizer.state_dict(),
+                        'preprocessor': None if image_preprocessor is None else image_preprocessor.state_dict(),
                         'model': model.state_dict()
                     }, save_path.replace('.pth', '_e%d_top1_%.3f_%.3f' % (epoch, rs['train']['top1'], rs['test']['top1']) + '.pth'))
 
@@ -517,6 +549,8 @@ def spawn_process(rank, worldsize, port_suffix):
 
     if worldsize:
         assert worldsize == C.get()['gpus'], "Did not specify the number of GPUs in Config with which it was started."
+    else:
+        assert 'gpus' not in C.get() or C.get()['gpus'] == 1
 
     assert (args.only_eval and args.save) or not args.only_eval, 'checkpoint path not provided in evaluation mode.'
 
@@ -526,8 +560,8 @@ def spawn_process(rank, worldsize, port_suffix):
         else:
             logger.warning('Provide --save argument to save the checkpoint. Without it, training result will not be saved!')
 
-    if args.save:
-        add_filehandler(logger, args.save.replace('.pth', '.log'))
+    #if args.save:
+        #add_filehandler(logger, args.save.replace('.pth', '.log'))
 
     #logger.info(json.dumps(C.get().conf, indent=4))
 
