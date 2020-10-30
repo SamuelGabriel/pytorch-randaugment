@@ -2,17 +2,17 @@ model:
   type: wresnet28_10
 dataset: cifar100
 aug: default
-augmentation_search_space: long_wide
+augmentation_search_space: randaug_standard
 cutout: 16
 batch: 64
 gpus: 4
-epoch: 400
+epoch: 500
 lr: 0.05
 lr_schedule:
   type: 'cosine'
   warmup:
     multiplier: 2
-    epoch: 5
+    epoch: 25
 optimizer:
   type: sgd
   nesterov: True
@@ -51,9 +51,7 @@ meta_opt:
   meta_optimizer:
     type: adam
     lr: .1
-    beta1: .0
+    beta1: .9
     beta2: .999
-
 val_step_trainloader_val_share: .2
-step_optimizer_every: 2
-different_trainloader_for_val: true
+step_optimizer_every: 10

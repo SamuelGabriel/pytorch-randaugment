@@ -1,0 +1,18 @@
+model:
+  type: wresnet28_10
+  weight_norm: true
+dataset: cifar100
+aug: default
+cutout: 16
+batch: 10
+epoch: 1
+lr: 0.01
+
+lr_schedule:
+  type: 'constant'
+
+optimizer:
+  type: sgd
+  nesterov: True
+  decay: 0.0005
+

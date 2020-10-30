@@ -21,6 +21,7 @@ import torchvision
 
 from tqdm import tqdm
 from theconf import Config as C, ConfigArgumentParser
+from argparse import ArgumentParser
 from backpack import backpack, extend, memory_cleanup
 from backpack.extensions import BatchL2Grad
 from extensions.dot_align import DotAlignment, DistributedDotAlignment
@@ -271,12 +272,12 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
     if not reporter:
         reporter = lambda **kwargs: 0
 
-    if not tag or rank > 0:
+    if not tag or (world_size and torch.distributed.get_rank() > 0):
         from RandAugment.metrics import SummaryWriterDummy as SummaryWriter
         logger.warning('tag not provided or rank > 0 -> no tensorboard log.')
     else:
         from tensorboardX import SummaryWriter
-    writers = [SummaryWriter(log_dir='./logs3/%s/%s' % (tag, x)) for x in ['train', 'valid', 'test', 'testtrain']]
+    writers = [SummaryWriter(log_dir='./logs4/%s/%s' % (tag, x)) for x in ['train', 'valid', 'test', 'testtrain']]
 
     def get_meta_optimizer_factory():
         meta_flags = C.get().get('meta_opt',{})
@@ -420,21 +421,24 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
         if 'model' in data or 'state_dict' in data:
             key = 'model' if 'model' in data else 'state_dict'
             logger.info('checkpoint epoch@%d' % data['epoch'])
-            if not isinstance(model, DataParallel):
-                model.load_state_dict({k.replace('module.', ''): v for k, v in data[key].items()})
-            else:
-                model.load_state_dict({k if 'module.' in k else 'module.'+k: v for k, v in data[key].items()})
-            optimizer.load_state_dict(data['optimizer'])
-            if data['preprocessor'] is not None:
-                image_preprocessor.load_state_dict(data['preprocessor'])
-            else:
-                assert image_preprocessor is None
-            if data['epoch'] < C.get()['epoch']:
-                epoch_start = data['epoch']
-            else:
-                only_eval = True
+            if C.get().get('load_main_model', False):
+                if not isinstance(model, DataParallel):
+                    model.load_state_dict({k.replace('module.', ''): v for k, v in data[key].items()})
+                else:
+                    model.load_state_dict({k if 'module.' in k else 'module.'+k: v for k, v in data[key].items()})
+                optimizer.load_state_dict(data['optimizer'])
+                if data['epoch'] < C.get()['epoch']:
+                    epoch_start = data['epoch']
+                else:
+                    only_eval = True
+            if C.get().get('load_side_model', False):
+                if data['preprocessor'] is not None:
+                    image_preprocessor.load_state_dict(data['preprocessor'])
+                else:
+                    assert image_preprocessor is None
         else:
-            model.load_state_dict({k: v for k, v in data.items()})
+            #model.load_state_dict({k: v for k, v in data.items()})
+            raise ValueError(f"Wrong format of data in save path: {save_path}.")
         del data
     else:
         logger.info('"%s" file not found. skip to pretrain weights...' % save_path)
@@ -474,9 +478,10 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
         if math.isnan(rs['train']['loss']):
             raise Exception('train loss is NaN.')
 
-        if epoch % 5 == 0 or epoch == max_epoch:
+        if epoch % 20 == 0 or epoch == max_epoch:
             with torch.no_grad():
-                rs['testtrain'] = run_epoch(rank, worldsize, model, testtrainloader_, criterion, None, desc_default='testtrain', epoch=epoch, writer=writers[3], verbose=True, preprocessor=image_preprocessor)
+                if C.get().get('compute_testtrain', False):
+                    rs['testtrain'] = run_epoch(rank, worldsize, model, testtrainloader_, criterion, None, desc_default='testtrain', epoch=epoch, writer=writers[3], verbose=True, preprocessor=image_preprocessor)
                 rs['test'] = run_epoch(rank, worldsize, model, testloader_, criterion, None, desc_default='*test', epoch=epoch, writer=writers[2], verbose=True, preprocessor=image_preprocessor)
 
 
@@ -484,7 +489,8 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
                 if metric != 'last':
                     best_top1 = rs[metric]['top1']
                 for key, setname in itertools.product(['loss', 'top1', 'top5'], ['train', 'test', 'testtrain']):
-                    result['%s_%s' % (key, setname)] = rs[setname][key]
+                    if setname in rs and key in rs[setname]:
+                        result['%s_%s' % (key, setname)] = rs[setname][key]
                 result['epoch'] = epoch
 
                 #writers[1].add_scalar('valid_top1/best', rs['valid']['top1'], epoch)
@@ -496,7 +502,7 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
                 )
 
                 # save checkpoint
-                if save_path:
+                if save_path and C.get().get('save_model', True):
                     logger.info('save model@%d to %s' % (epoch, save_path))
                     torch.save({
                         'epoch': epoch,
@@ -524,31 +530,46 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
     result['top1_test'] = best_top1
     return result
 
-def setup(rank, world_size, port_suffix):
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = f'123{port_suffix}'
+def setup(global_rank, local_rank, world_size, port_suffix):
+    torch.cuda.set_device(local_rank)
+    if port_suffix is not None:
+        os.environ['MASTER_ADDR'] = 'localhost'
+        os.environ['MASTER_PORT'] = f'123{port_suffix}'
 
-    # initialize the process group
-    torch.cuda.set_device(rank)
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+        # initialize the process group
+        dist.init_process_group("nccl", rank=global_rank, world_size=world_size)
+        return global_rank, world_size
+    else:
+        dist.init_process_group(backend='NCCL', init_method='env://')
+        return torch.distributed.get_rank(), torch.distributed.get_world_size()
 
 def cleanup():
     dist.destroy_process_group()
 
-def spawn_process(rank, worldsize, port_suffix):
-    if worldsize:
-        setup(rank, worldsize, port_suffix)
+def parse_args():
     parser = ConfigArgumentParser(conflict_handler='resolve')
     parser.add_argument('--tag', type=str, default='')
-    parser.add_argument('--dataroot', type=str, default='/data/private/pretrainedmodels', help='torchvision data folder')
+    parser.add_argument('--dataroot', type=str, default='/data/private/pretrainedmodels',
+                        help='torchvision data folder')
     parser.add_argument('--save', type=str, default='')
     parser.add_argument('--cv-ratio', type=float, default=0.0)
     parser.add_argument('--cv', type=int, default=0)
     parser.add_argument('--only-eval', action='store_true')
-    args = parser.parse_args()
+    parser.add_argument('--local_rank', default=None, type=int)
+    return parser.parse_args()
+
+
+def spawn_process(global_rank, worldsize, port_suffix, local_rank=None):
+    if local_rank is None:
+        local_rank = global_rank
+    if worldsize != 0:
+        global_rank, worldsize = setup(global_rank, local_rank, worldsize, port_suffix)
+    args = parse_args()
+    print(
+        f'Multi-Node with rank {torch.distributed.get_rank()} or {global_rank} in a world of size {torch.distributed.get_world_size()}')
 
     if worldsize:
-        assert worldsize == C.get()['gpus'], "Did not specify the number of GPUs in Config with which it was started."
+        assert worldsize == C.get()['gpus'], f"Did not specify the number of GPUs in Config with which it was started: {worldsize} vs {C.get()['gpus']}"
     else:
         assert 'gpus' not in C.get() or C.get()['gpus'] == 1
 
@@ -567,7 +588,7 @@ def spawn_process(rank, worldsize, port_suffix):
 
     import time
     t = time.time()
-    result = train_and_eval(rank, worldsize, args.tag, args.dataroot, test_ratio=args.cv_ratio, cv_fold=args.cv, save_path=args.save, only_eval=args.only_eval, metric='test')
+    result = train_and_eval(local_rank, worldsize, args.tag, args.dataroot, test_ratio=args.cv_ratio, cv_fold=args.cv, save_path=args.save, only_eval=args.only_eval, metric='test')
     elapsed = time.time() - t
 
     logger.info('done.')
@@ -582,12 +603,19 @@ def spawn_process(rank, worldsize, port_suffix):
 
 
 if __name__ == '__main__':
-    world_size = torch.cuda.device_count()
-    port_suffix = str(random.randint(10,99))
-    if world_size > 1:
-        result = mp.spawn(spawn_process,
-                          args=(world_size,port_suffix),
-                          nprocs=world_size,
-                          join=True)
+    pre_parser = ArgumentParser()
+    pre_parser.add_argument('--local_rank', default=None, type=int)
+    args, _ = pre_parser.parse_known_args()
+    if args.local_rank is None:
+        print("Spawning processes")
+        world_size = torch.cuda.device_count()
+        port_suffix = str(random.randint(10,99))
+        if world_size > 1:
+            result = mp.spawn(spawn_process,
+                              args=(world_size,port_suffix),
+                              nprocs=world_size,
+                              join=True)
+        else:
+            spawn_process(0, 0, None)
     else:
-        spawn_process(0, 0, None)
+        spawn_process(None, -1, None, local_rank=args.local_rank)
