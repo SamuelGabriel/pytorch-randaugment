@@ -272,7 +272,7 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
     if not reporter:
         reporter = lambda **kwargs: 0
 
-    if not tag or (world_size and torch.distributed.get_rank() > 0):
+    if not tag or (worldsize and torch.distributed.get_rank() > 0):
         from RandAugment.metrics import SummaryWriterDummy as SummaryWriter
         logger.warning('tag not provided or rank > 0 -> no tensorboard log.')
     else:
