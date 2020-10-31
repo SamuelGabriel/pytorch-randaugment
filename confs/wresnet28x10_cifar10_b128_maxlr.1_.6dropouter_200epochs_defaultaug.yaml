@@ -1,0 +1,30 @@
+model:
+  type: wresnet28_10
+  adaptive_dropouter:
+    hidden_size: 1
+    target_p: .5
+    simple_dropout: true
+    cross_entropy_alpha: .1
+dataset: cifar10
+cutout: 16
+aug: default
+
+meta_opt:
+  meta_optimizer:
+    type: adam
+    lr: .0
+    beta1: .0
+    beta2: .999
+
+batch: 128
+epoch: 300
+lr: 0.05
+lr_schedule:
+  type: 'cosine'
+  warmup:
+    multiplier: 2
+    epoch: 5
+optimizer:
+  type: sgd
+  nesterov: True
+  decay: 0.0005
