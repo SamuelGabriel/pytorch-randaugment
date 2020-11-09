@@ -16,6 +16,7 @@ from theconf import Config as C
 from RandAugment.augmentations import *
 from RandAugment.common import get_logger, RoundRobinDataLoader, copy_and_replace_transform
 from RandAugment.dataset.noised_cifar10 import NoisedCIFAR10, TargetNoisedCIFAR10
+from RandAugment.imagenet import ImageNet
 
 from RandAugment.augmentations import Lighting
 from RandAugment.adaptive_loader import AdaptiveLoaderByLabel
@@ -30,7 +31,8 @@ _IMAGENET_PCA = {
         [-0.5836, -0.6948,  0.4203],
     ]
 }
-_CIFAR_MEAN, _CIFAR_STD = (0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)
+_CIFAR_MEAN, _CIFAR_STD = (0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010) # these are for CIFAR 10, not for cifar100 actaully. They are pretty similar, though.
+# mean für cifar 100: tensor([0.5071, 0.4866, 0.4409])
 
 
 def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_optimizer_factory=None, distributed=False, summary_writer=None):
@@ -69,6 +71,9 @@ def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
+        dataset_info['mean'] = [0.485, 0.456, 0.406]
+        dataset_info['std'] = [0.229, 0.224, 0.225]
+        dataset_info['img_dims'] = (3,224,224)
     else:
         raise ValueError('dataset=%s' % dataset)
 
@@ -85,9 +90,22 @@ def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_
         transform_train.transforms.append(CutoutDefault(C.get()['cutout']))
 
     if 'preprocessor' in C.get():
-        print("Not using any transforms in dataset, since preprocessor is active.")
-        transform_train = transforms.ToTensor()
-        transform_test = transforms.ToTensor()
+        if 'imagenet' in dataset:
+            print("Only using cropping/centering transforms on dataset, since preprocessor active.")
+            transform_train = transforms.Compose([
+                transforms.RandomResizedCrop(224, scale=(0.08, 1.0), interpolation=Image.BICUBIC),
+                transforms.ToTensor(),
+            ])
+
+            transform_test = transforms.Compose([
+                transforms.Resize(256, interpolation=Image.BICUBIC),
+                transforms.CenterCrop(224),
+                transforms.ToTensor(),
+            ])
+        else:
+            print("Not using any transforms in dataset, since preprocessor is active.")
+            transform_train = transforms.ToTensor()
+            transform_test = transforms.ToTensor()
 
     if dataset == 'cifar10':
         total_trainset = torchvision.datasets.CIFAR10(root=dataroot, train=True, download=True, transform=transform_train)
@@ -107,8 +125,10 @@ def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_
         total_trainset = ConcatDataset([trainset, extraset])
         testset = torchvision.datasets.SVHN(root=dataroot, split='test', download=True, transform=transform_test)
     elif dataset == 'imagenet':
-        total_trainset = torchvision.datasets.ImageNet(root=os.path.join(dataroot, 'imagenet-pytorch'), transform=transform_train)
-        testset = torchvision.datasets.ImageNet(root=os.path.join(dataroot, 'imagenet-pytorch'), split='val', transform=transform_test)
+        # Ignore archive only means to not to try to extract the files again, because they already are and the zip files
+        # are not there no more
+        total_trainset = ImageNet(root=os.path.join(dataroot, 'imagenet-pytorch'), transform=transform_train, ignore_archive=True)
+        testset = ImageNet(root=os.path.join(dataroot, 'imagenet-pytorch'), split='val', transform=transform_test, ignore_archive=True)
 
         # compatibility
         total_trainset.targets = [lb for _, lb in total_trainset.samples]
@@ -136,8 +156,10 @@ def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_
     if distributed:
         assert split == 0.0, "Split not supported for distributed training."
         train_sampler = DistributedSampler(total_trainset)
-        test_sampler = DistributedSampler(testset, shuffle=False)
-        test_train_sampler = DistributedSampler(total_trainset, shuffle=False)
+        test_sampler = None
+        test_train_sampler = None # if these are specified, acc/loss computation is wrong for results.
+        # while one has to say, that this setting leads to the test sets being computed seperately on each gpu which
+        # might be considered not-very-climate-friendly
     else:
         test_sampler = None
         test_train_sampler = None
@@ -149,6 +171,7 @@ def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_
         share = C.get()['val_step_trainloader_val_share']
         train_subset_inds, val_subset_inds = stratified_split(total_trainset.targets,share)
         val_ds, train_ds = Subset(total_trainset, val_subset_inds), Subset(total_trainset, train_subset_inds)
+        # TODO no aug on val?
         if distributed:
             tra_sampler, val_sampler = DistributedSampler(train_ds), DistributedSampler(val_ds)
         else:

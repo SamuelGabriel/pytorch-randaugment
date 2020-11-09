@@ -154,7 +154,7 @@ def _shear_x_impl(pil_img, level):
   level = float_parameter(level, min_max_vals.shear.max)
   if random.random() > 0.5:
     level = -level
-  return pil_img.transform((32, 32), Image.AFFINE, (1, level, 0, 0, 1, 0))
+  return pil_img.transform(pil_img.size, Image.AFFINE, (1, level, 0, 0, 1, 0))
 
 
 shear_x = TransformT('ShearX', _shear_x_impl)
@@ -177,7 +177,7 @@ def _shear_y_impl(pil_img, level):
   level = float_parameter(level, min_max_vals.shear.max)
   if random.random() > 0.5:
     level = -level
-  return pil_img.transform((32, 32), Image.AFFINE, (1, 0, 0, level, 1, 0))
+  return pil_img.transform(pil_img.size, Image.AFFINE, (1, 0, 0, level, 1, 0))
 
 
 shear_y = TransformT('ShearY', _shear_y_impl)
@@ -200,7 +200,7 @@ def _translate_x_impl(pil_img, level):
   level = int_parameter(level, min_max_vals.translate.max)
   if random.random() > 0.5:
     level = -level
-  return pil_img.transform((32, 32), Image.AFFINE, (1, 0, level, 0, 1, 0))
+  return pil_img.transform(pil_img.size, Image.AFFINE, (1, 0, level, 0, 1, 0))
 
 
 translate_x = TransformT('TranslateX', _translate_x_impl)
@@ -223,7 +223,7 @@ def _translate_y_impl(pil_img, level):
   level = int_parameter(level, min_max_vals.translate.max)
   if random.random() > 0.5:
     level = -level
-  return pil_img.transform((32, 32), Image.AFFINE, (1, 0, 0, 0, 1, level))
+  return pil_img.transform(pil_img.size, Image.AFFINE, (1, 0, 0, 0, 1, level))
 
 
 translate_y = TransformT('TranslateY', _translate_y_impl)
@@ -328,20 +328,36 @@ opt_blur = TransformT(
     'OptBlur', optionalize(lambda pil_img, level: pil_img.filter(ImageFilter.BLUR)))
 opt_contour = TransformT(
     'OptContour', optionalize(lambda pil_img, level: pil_img.filter(ImageFilter.CONTOUR)))
+contour = TransformT(
+    'Contour', lambda pil_img, level: pil_img.filter(ImageFilter.CONTOUR))
 opt_detail = TransformT(
     'OptDetail', optionalize(lambda pil_img, level: pil_img.filter(ImageFilter.DETAIL)))
+detail = TransformT(
+    'Detail', lambda pil_img, level: pil_img.filter(ImageFilter.DETAIL))
 opt_edge_enhance = TransformT(
     'OptEdgeEnhance', optionalize(lambda pil_img, level: pil_img.filter(ImageFilter.EDGE_ENHANCE)))
+edge_enhance = TransformT(
+    'EdgeEnhance', lambda pil_img, level: pil_img.filter(ImageFilter.EDGE_ENHANCE))
 opt_sharpen = TransformT(
     'OptSharpen', optionalize(lambda pil_img, level: pil_img.filter(ImageFilter.SHARPEN)))
+sharpen = TransformT(
+    'Sharpen', (lambda pil_img, level: pil_img.filter(ImageFilter.SHARPEN)))
 opt_max = TransformT(
     'OptMax', optionalize(lambda pil_img, level: pil_img.filter(ImageFilter.MaxFilter)))
+max_ = TransformT(
+    'Max', lambda pil_img, level: pil_img.filter(ImageFilter.MaxFilter))
 opt_min = TransformT(
     'OptMin', optionalize(lambda pil_img, level: pil_img.filter(ImageFilter.MinFilter)))
+min_ = TransformT(
+    'Min', lambda pil_img, level: pil_img.filter(ImageFilter.MinFilter))
 opt_median = TransformT(
     'OptMedian', optionalize(lambda pil_img, level: pil_img.filter(ImageFilter.MedianFilter)))
+median = TransformT(
+    'Median', lambda pil_img, level: pil_img.filter(ImageFilter.MedianFilter))
 opt_gaussian = TransformT(
     'OptGaussian', optionalize(lambda pil_img, level: pil_img.filter(ImageFilter.GaussianBlur)))
+gaussian = TransformT(
+    'Gaussian', lambda pil_img, level: pil_img.filter(ImageFilter.GaussianBlur))
 opt_black = TransformT(
     'OptBlack', optionalize(lambda pil_img, level: ImageOps.posterize(pil_img, 0))
 )
@@ -380,8 +396,9 @@ ALL_TRANSFORMS = [
 
 min_max_vals = MinMaxVals()
 
-def set_search_space(search_space):
-    global ALL_TRANSFORMS, min_max_vals
+def set_search_space(search_space, parameter_max):
+    global ALL_TRANSFORMS, min_max_vals, PARAMETER_MAX
+    PARAMETER_MAX = parameter_max
     if 'wide' in search_space:
         min_max_vals = MinMaxVals(
             shear=MinMax(.0,.99),
@@ -457,6 +474,38 @@ def set_search_space(search_space):
                 opt_median,
                 opt_gaussian,
             ]
+    elif 'xlong' in search_space:
+        ALL_TRANSFORMS = [
+            identity,
+            auto_contrast,
+            equalize,
+            rotate,
+            solarize,
+            color,
+            posterize,
+            contrast,
+            brightness,
+            sharpness,
+            shear_x,
+            shear_y,
+            translate_x,
+            translate_y,
+            # sample_pairing,
+            blur,
+            invert,
+            flip_lr,
+            flip_ud,
+            cutout,
+            crop_bilinear,
+            contour,
+            detail,
+            edge_enhance,
+            sharpen,
+            max_,
+            min_,
+            median,
+            gaussian
+        ]
     elif 'long' in search_space:
         ALL_TRANSFORMS = [
             identity,

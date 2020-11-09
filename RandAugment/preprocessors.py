@@ -1,11 +1,17 @@
 import torch
 import torchvision
 from torch import nn
+from time import time
+from PIL import Image
+import multiprocessing
 from abc import abstractmethod, ABCMeta
 from torchvision import transforms
 from RandAugment import google_augmentations, augmentations
 from RandAugment.networks.convnet import SeqConvNet
 from RandAugment.common import sigmax, log_sigmax, exploresoftmax, log_exploresoftmax, replace_parameters, recursive_backpack_memory_cleanup, ListDataLoader
+from RandAugment.data import _IMAGENET_PCA
+from RandAugment.augmentations import Lighting
+from theconf import Config as C
 
 from copy import deepcopy
 import random
@@ -69,7 +75,8 @@ class StandardCIFARPreprocessor(ImagePreprocessor):
         else:
             self.eraser = lambda x: x
 
-    def forward(self, imgs, step):
+    def forward(self, imgs, step, validation_step=False):
+        assert not validation_step
         with torch.no_grad():
             img_dims = torchvision.transforms.ToTensor()(imgs[0]).shape
             batch_tensor = torch.zeros((len(imgs),) + tuple(img_dims))
@@ -84,6 +91,48 @@ class StandardCIFARPreprocessor(ImagePreprocessor):
                 batch_tensor[i] = t
 
             return batch_tensor.to(self.device)
+
+class StandardImagenetPreprocessor(ImagePreprocessor):
+    def __init__(self, cutout, **kwargs):
+        super().__init__(**kwargs)
+        assert not cutout, "Please do not specify cutout with imagenet, it is not implemented."
+        self.transform_train = transforms.Compose([
+            transforms.ColorJitter(
+                brightness=0.4,
+                contrast=0.4,
+                saturation=0.4,
+            ),
+            transforms.ToTensor(),
+            Lighting(0.1, _IMAGENET_PCA['eigval'], _IMAGENET_PCA['eigvec']),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+
+        self.transform_test = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+
+    @torch.no_grad()
+    def forward(self, imgs, step, validation_step=False):
+        assert not validation_step
+        img_dims = torchvision.transforms.ToTensor()(imgs[0]).shape
+        batch_tensor = torch.zeros((len(imgs),) + tuple(img_dims))
+        for i, img in enumerate(imgs):
+            if self.train:
+                t_img = self.transform_train(img)
+            else:
+                t_img = self.transform_test(img)
+            batch_tensor[i] = t_img
+        return batch_tensor.to(self.device)
+
+def get_standard_preprocessor(dataset_info, cutout, **kwargs):
+    dataset = C.get()['dataset']
+    if 'cifar' in dataset:
+        return StandardCIFARPreprocessor(dataset_info, cutout, **kwargs)
+    elif 'imagenet' in dataset:
+        return StandardImagenetPreprocessor(cutout, **kwargs)
+    else:
+        raise ValueError(f"Dataset {dataset} does not have a standard preprocessor.")
 
 
 class AugmentationSampler(nn.Module):
@@ -170,8 +219,7 @@ class LearnedPreprocessorRandaugmentSpace(ImagePreprocessor):
         img_dims = dataset_info['img_dims']
         self.num_transforms = google_augmentations.num_augmentations()
         self.num_scales = google_augmentations.PARAMETER_MAX + 1
-        self.standard_cifar_preprocessor = StandardCIFARPreprocessor(dataset_info, cutout=cutout,
-                                                                     device=self.device)
+        self.standard_cifar_preprocessor = get_standard_preprocessor(dataset_info,cutout,device=self.device)
         self.model = model_for_online_tests
 
         dists = (torch.softmax, torch.log_softmax)
@@ -293,7 +341,8 @@ class LearnedPreprocessorRandaugmentSpace(ImagePreprocessor):
 
 class RandAugmentationSampler(nn.Module):
     def __init__(self, hidden_dimension, num_transforms, num_scales, possible_num_sequential_transforms, q_residual, q_zero_init, scale_embs_zero_init, scale_embs_zero_strength_bias,
-                 label_smoothing_rate, distribution_functions, use_images, aug_probs, dataset_info):
+                 label_smoothing_rate, distribution_functions, use_images, aug_probs, scale_logits_trainable, dataset_info):
+        assert scale_logits_trainable
         super().__init__()
         self.dist, self.log_dist = distribution_functions
         if aug_probs:
@@ -515,7 +564,7 @@ def update(model: RandAugmentationSampler, opt, all_rewards, ent_alpha):
 
 class NonEmbeddingRandAugmentationSampler(nn.Module):
     def __init__(self, hidden_dimension, num_transforms, num_scales, possible_num_sequential_transforms, q_residual, q_zero_init, scale_embs_zero_init, scale_embs_zero_strength_bias,
-                 label_smoothing_rate, distribution_functions, use_images, aug_probs, dataset_info):
+                 label_smoothing_rate, distribution_functions, use_images, aug_probs, scale_logits_trainable, dataset_info):
         super().__init__()
         assert not use_images
         self.dist, self.log_dist = distribution_functions
@@ -525,7 +574,11 @@ class NonEmbeddingRandAugmentationSampler(nn.Module):
             self.aug_logits = None
         self.num_transforms_logits = nn.Parameter(torch.zeros(len(possible_num_sequential_transforms), requires_grad=True))
 
-        self.scale_logits = nn.Parameter(torch.zeros(num_transforms,num_scales, requires_grad=True))
+        self.scale_logits = nn.Parameter(torch.zeros(num_transforms,num_scales))
+        if scale_logits_trainable:
+            self.scale_logits.requires_grad = True
+        else:
+            self.scale_logits.requires_grad = False
         self.label_smoothing_rate = label_smoothing_rate
 
         self.possible_num_sequential_transforms = possible_num_sequential_transforms
@@ -607,15 +660,13 @@ class LearnedRandAugmentPreprocessor(ImagePreprocessor):
                  importance_sampling=False, cutout=0, normalize_reward=True, model_for_online_tests=None,
                  D_out=10, q_zero_init=True, q_residual=False, scale_embs_zero_init=False, scale_embs_zero_strength_bias=0., label_smoothing_rate=0.,
                  possible_num_sequential_transforms=[1,2,3,4], sigmax_dist=False, exploresoftmax_dist=False, use_images_for_sampler=False, uniaug_val=False, old_preprocessor_val=False, current_preprocessor_val=False,
-                 aug_probs=False, use_non_embedding_sampler=False, ppo=False, summary_prefix='', **kwargs):
+                 aug_probs=False, use_non_embedding_sampler=False, ppo=False, scale_trainable=True, standard_augmentation_on_validation_steps=True, delete_every_x_steps=0, summary_prefix='', **kwargs):
         super().__init__(**kwargs)
         print('using learned preprocessor')
 
-        img_dims = dataset_info['img_dims']
         self.num_transforms = google_augmentations.num_augmentations()
         self.num_scales = google_augmentations.PARAMETER_MAX + 1
-        self.standard_cifar_preprocessor = StandardCIFARPreprocessor(dataset_info, cutout=cutout,
-                                                                     device=self.device)
+        self.standard_cifar_preprocessor = get_standard_preprocessor(dataset_info, cutout, device=self.device)
         self.model = model_for_online_tests
 
         dists = (torch.softmax, torch.log_softmax)
@@ -625,9 +676,12 @@ class LearnedRandAugmentPreprocessor(ImagePreprocessor):
         if exploresoftmax_dist:
             dists = (exploresoftmax, log_exploresoftmax)
 
-        self.augmentation_sampler = (NonEmbeddingRandAugmentationSampler if use_non_embedding_sampler else RandAugmentationSampler)(hidden_dimension, self.num_transforms, self.num_scales, torch.tensor(possible_num_sequential_transforms),
-                                                        q_residual, q_zero_init, scale_embs_zero_init, scale_embs_zero_strength_bias,
-                                                        label_smoothing_rate, dists,use_images_for_sampler, aug_probs, dataset_info).to(self.device)
+        def init_augmentation_sampler():
+            self.augmentation_sampler = (NonEmbeddingRandAugmentationSampler if use_non_embedding_sampler else RandAugmentationSampler)(hidden_dimension, self.num_transforms, self.num_scales, torch.tensor(possible_num_sequential_transforms),
+                                                            q_residual, q_zero_init, scale_embs_zero_init, scale_embs_zero_strength_bias,
+                                                            label_smoothing_rate, dists,use_images_for_sampler, aug_probs, scale_trainable, dataset_info).to(self.device)
+        self.init_augmentation_sampler = init_augmentation_sampler
+        init_augmentation_sampler()
         self.agumentation_sampler_copies = []
         self.bs = bs
         self.val_bs = val_bs
@@ -639,6 +693,8 @@ class LearnedRandAugmentPreprocessor(ImagePreprocessor):
         self.scale_entropy_alpha = scale_entropy_alpha
         self.importance_sampling = importance_sampling
         self.possible_num_sequential_transforms = possible_num_sequential_transforms
+        self.standard_augmentation_on_validation_steps = standard_augmentation_on_validation_steps
+        self.delete_every_x_steps = delete_every_x_steps
         self.uniaug_val = uniaug_val
         self.aug_probs = aug_probs
         self.old_preprocessor_val = old_preprocessor_val
@@ -704,9 +760,18 @@ class LearnedRandAugmentPreprocessor(ImagePreprocessor):
             for op, scale in augs:
                 img = google_augmentations.apply_augmentation(op, scale, img)
             t_imgs.append(img)
+
         if self.importance_sampling and self.training and not validation_step:
             w = 1. / (self.num_transforms * self.num_scales * torch.exp(aug_sampler.logps.detach()))
             return self.standard_cifar_preprocessor(t_imgs, step), w * (len(w) / torch.sum(w))
+
+        if self.training and validation_step and not self.standard_augmentation_on_validation_steps:
+            self.standard_cifar_preprocessor.training = False
+            #t_imgs = [google_augmentations.flip_ud.pil_transformer(1.,0)(img) for img in t_imgs] #to check what the model actually does
+            r = self.standard_cifar_preprocessor(t_imgs, step)
+            self.standard_cifar_preprocessor.training = True
+            return r
+
         return self.standard_cifar_preprocessor(t_imgs, step)
 
     def compute_weights(self, rewards):
@@ -768,6 +833,8 @@ class LearnedRandAugmentPreprocessor(ImagePreprocessor):
 
     def reset_state(self):
         del self.agumentation_sampler_copies
+        if self.delete_every_x_steps and hasattr(self,'t') and self.t % self.delete_every_x_steps == 0:
+            self.init_augmentation_sampler()
         self.agumentation_sampler_copies = []
 
     def write_summary(self, aug_sampler, step):

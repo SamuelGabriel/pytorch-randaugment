@@ -1,7 +1,8 @@
 from tensorboard.backend.event_processing import event_accumulator
 from tensorboardX import SummaryWriter
-from os import listdir
-from os.path import isfile, join
+from os import listdir, makedirs, rmdir
+from os.path import isfile, join, isdir
+import shutil
 import re
 import argparse
 from collections import defaultdict
@@ -43,16 +44,28 @@ def curves_to_matrix(curves):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Get Top1 Results.')
     parser.add_argument('--logdir', default='logs3')
-    parser.add_argument('--out_logdir', default='logs3averaged')
+    parser.add_argument('--out-logdir', default='/tmp/logs3av')
     args = parser.parse_args()
+
+    if isdir(args.out_logdir):
+        if not input(f"I will now delete {args.out_logdir}, ok?\n"):
+            raise ValueError(f"Need to delete {args.out_logdir} before using it again.")
+        shutil.rmtree(args.out_logdir)
+
+    else:
+        makedirs(args.out_logdir)
+
 
     directories = [join(args.logdir,d) for d in listdir(args.logdir)]
     directory_map = defaultdict(list)
     for d in directories:
         directory_map[get_exp_name(d)].append(d)
     for exp_name, exp_instance_directory in tqdm(directory_map.items()):
-        for split in ['test']:
+        for split in ['test', 'testtrain']:
             ds = [join(d,split) for d in exp_instance_directory]
+            ds = [d for d in ds if isdir(d)]
+            if not ds:
+                continue
             for tag in ['top1',]:
                 curves = [get_last_curve(d, tag)[0] for d in ds]
                 curves = [c for c in curves if c is not None]
