@@ -4,11 +4,14 @@ import random
 from copy import copy
 from typing import Union
 
+import numpy as np
 import torch
 from backpack import memory_cleanup
 from torch.utils.checkpoint import check_backward_validity, detach_variable, get_device_states, set_device_states
 from torchvision.datasets import VisionDataset, CIFAR10, CIFAR100, ImageFolder
 from torch.utils.data import Subset
+
+from PIL import Image
 
 formatter = logging.Formatter('[%(asctime)s] [%(name)s] [%(levelname)s] %(message)s')
 warnings.filterwarnings("ignore", "(Possibly )?corrupt EXIF data", UserWarning)
@@ -243,5 +246,22 @@ def apply_weightnorm(nn):
             torch.nn.utils.weight_norm(module, name='weight', dim=0)
     nn.apply(apply_weightnorm_)
 
+
+class PILImageToHWCByteTensor():
+    def __call__(self, pic):
+        img = torch.as_tensor(np.array(pic))
+        img = img.view(pic.size[1], pic.size[0], len(pic.getbands()))
+        return img
+
+    def __repr__(self):
+        return self.__class__.__name__ + '()'
+
+class HWCByteTensorToPILImage():
+    def __call__(self, pic):
+        npimg = pic.numpy()
+        return Image.fromarray(npimg, mode='RGB')
+
+    def __repr__(self):
+        return self.__class__.__name__ + '()'
 
 

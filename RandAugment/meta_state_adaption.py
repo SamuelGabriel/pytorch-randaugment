@@ -263,13 +263,11 @@ class Modulator(nn.Module):
         self.opt = optimizer_creator(self.get_multiplier.parameters())
         self.summary_writer = summary_writer
 
-        self.t = -1
 
     def use_this_multiplier_once(self, m):
         self.one_time_usage_m = m
 
     def forward(self, orig_hiddens):
-        self.t += 1
         if hasattr(self,'one_time_usage_m') and self.one_time_usage_m is not None:
             r = self.one_time_usage_m * orig_hiddens
             self.one_time_usage_m = None

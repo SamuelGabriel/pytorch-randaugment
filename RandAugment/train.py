@@ -28,7 +28,7 @@ from backpack import backpack, extend, memory_cleanup
 from backpack.extensions import BatchL2Grad
 from extensions.dot_align import DotAlignment, DistributedDotAlignment
 
-from RandAugment.common import get_logger, get_sum_along_batch, replace_parameters
+from RandAugment.common import get_logger, get_sum_along_batch, replace_parameters, HWCByteTensorToPILImage
 from RandAugment.data import get_dataloaders
 from RandAugment.lr_scheduler import adjust_learning_rate_resnet
 from RandAugment.metrics import accuracy, Accumulator
@@ -113,21 +113,26 @@ def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='
         call_attr_on_meta_modules('eval')
     gc.collect()
     torch.cuda.empty_cache()
-    print('mem usage', resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    #print('mem usage', resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
     has_val_steps = C.get().get('alignment_loss', {}).get('has_val_steps', False)
     finite_difference_loss = C.get().get('finite_difference_loss', {})
     model_meta_gradient = C.get().get('model_meta_gradient', False)
     if finite_difference_loss: has_val_steps = True
+    if 'next_step_loss' in C.get(): has_val_steps = True
     before_load_time = time()
     for batch in logging_loader: # logging loader might be a loader or a loader wrapped into tqdm
-        print(f'load time {time()-before_load_time}')
+        print(f'full step time {time()-before_load_time}')
+        before_load_time = time()
         data, label = batch[:2]
         steps += 1
         stime = time()
         if preprocessor:
-            data = [torchvision.transforms.ToPILImage()(ti) for ti in data]
+            print(f'pre back transform {time() - stime} data on {data.device}')
+            data = [HWCByteTensorToPILImage()(ti) for ti in data]
+            print(f'back transform {time() - stime}')
             data = preprocessor(data,int((epoch - 1) * total_steps) + steps, validation_step=(has_val_steps and steps % 2 == 0))
-        print(f'Preprocessor time {time()-stime}',file=sys.stderr)
+        #print(f'Preprocessor time {time()-stime}',file=sys.stderr)
+        print(f'{data.device} preprocess time {time()-stime}')
         if worldsize > 1:
             data, label = data.to(rank), label.to(rank)
         else:
@@ -151,14 +156,15 @@ def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='
         if optimizer and (communicate_grad_every == 1 or just_communicated_grad):
             optimizer.zero_grad()
 
-        print('mem usage before forward', torch.cuda.memory_allocated()/1000//1000, "MB")
+        #print('mem usage before forward', torch.cuda.memory_allocated()/1000//1000, "MB")
         recursive_backpack_memory_cleanup(model)
+        print(f' til cleanup time {time()-stime}')
         fb_time = time()
         preds = model(data)
         if 'test' in desc_default:
             recursive_backpack_memory_cleanup(model)
         loss = loss_fn(preds, label)
-        print('mem usage before backward', torch.cuda.memory_allocated()/1000//1000, "MB")
+        #print('mem usage before backward', torch.cuda.memory_allocated()/1000//1000, "MB")
         val_batch = C.get().get('val_batch',0)
         if optimizer:
             if 'alignment_loss' in C.get():
@@ -178,7 +184,7 @@ def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='
                                                align_with=alignment_loss_flags['align_with'], use_slow_version=alignment_loss_flags.get('use_slow_version',False))):
                         loss.backward()
                 if ('2' not in alignment_loss_flags['align_with'] or steps > 1) and (not has_val_steps or steps % 2 == 0):
-                    ga = get_sum_along_batch(model, 'grad_alignments')
+                    ga = get_sum_along_batch(model, 'grad_alignments') # TODO save time by only computing alignment in val steps
                 else:
                     ga = None
             elif 'unrolled_loop_loss' in C.get():
@@ -219,10 +225,14 @@ def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='
                 if communicate_grad:
                     loss.backward()
                 else:
+                    #torch.autograd.grad(loss, list(model.parameters()))
                     with model.no_sync():
                         loss.backward()
                 ga = None
-            print('mem usage after backward', torch.cuda.memory_allocated() / 1000 // 1000, "MB")
+            if 'next_step_loss' in C.get():
+                if not has_val_steps or steps % 2 == 0:
+                    ga = torch.ones(len(data)) * loss.detach()
+            #print('mem usage after backward', torch.cuda.memory_allocated() / 1000 // 1000, "MB")
 
             if finite_difference_loss and steps % 2 == 0: # eval step
                 if model_meta_gradient:
@@ -269,7 +279,7 @@ def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='
         if scheduler is not None:
             scheduler.step(epoch - 1 + float(steps) / total_steps)
 
-        before_load_time = time()
+        #before_load_time = time()
         del preds, loss, top1, top5, data, label
 
     if tqdm_disable:
@@ -418,6 +428,8 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
                                                                               scale_trainable=preprocessor_flags.get('scale_trainable',True),
                                                                               standard_augmentation_on_validation_steps=preprocessor_flags.get('standard_augmentation_on_validation_steps',True),
                                                                               delete_every_x_steps=preprocessor_flags.get('delete_every_x_steps',False),
+                                                                              use_rnn_sampler=preprocessor_flags.get('use_rnn_sampler',False),
+                                                                              use_simple_sampler=preprocessor_flags.get('use_simple_sampler',False),
                                                                               **extra_kwargs)
             else:
                 image_preprocessor = DifferentiableLearnedPreprocessor(dataset_info,hidden_dimension=preprocessor_flags['hidden_dim'],
@@ -587,6 +599,7 @@ def spawn_process(global_rank, worldsize, port_suffix, local_rank=None):
     if worldsize != 0:
         global_rank, worldsize = setup(global_rank, local_rank, worldsize, port_suffix)
     args = parse_args()
+    print('dist info', local_rank,global_rank,worldsize)
 
     if worldsize:
         assert worldsize == C.get()['gpus'], f"Did not specify the number of GPUs in Config with which it was started: {worldsize} vs {C.get()['gpus']}"

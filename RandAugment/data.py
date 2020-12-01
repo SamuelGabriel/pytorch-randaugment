@@ -14,7 +14,7 @@ from sklearn.model_selection import StratifiedShuffleSplit
 from theconf import Config as C
 
 from RandAugment.augmentations import *
-from RandAugment.common import get_logger, RoundRobinDataLoader, copy_and_replace_transform
+from RandAugment.common import get_logger, RoundRobinDataLoader, copy_and_replace_transform, PILImageToHWCByteTensor
 from RandAugment.dataset.noised_cifar10 import NoisedCIFAR10, TargetNoisedCIFAR10
 from RandAugment.imagenet import ImageNet
 
@@ -94,18 +94,18 @@ def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_
             print("Only using cropping/centering transforms on dataset, since preprocessor active.")
             transform_train = transforms.Compose([
                 transforms.RandomResizedCrop(224, scale=(0.08, 1.0), interpolation=Image.BICUBIC),
-                transforms.ToTensor(),
+                PILImageToHWCByteTensor(),
             ])
 
             transform_test = transforms.Compose([
                 transforms.Resize(256, interpolation=Image.BICUBIC),
                 transforms.CenterCrop(224),
-                transforms.ToTensor(),
+                PILImageToHWCByteTensor(),
             ])
         else:
             print("Not using any transforms in dataset, since preprocessor is active.")
-            transform_train = transforms.ToTensor()
-            transform_test = transforms.ToTensor()
+            transform_train = PILImageToHWCByteTensor()
+            transform_test = PILImageToHWCByteTensor()
 
     if dataset == 'cifar10':
         total_trainset = torchvision.datasets.CIFAR10(root=dataroot, train=True, download=True, transform=transform_train)
@@ -178,11 +178,11 @@ def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_
             tra_sampler = val_sampler = None
         trainloader = RoundRobinDataLoader(
             torch.utils.data.DataLoader(
-                train_ds, batch_size=batch, shuffle=tra_sampler is None, num_workers=1 if distributed else 32,
+                train_ds, batch_size=batch, shuffle=tra_sampler is None, num_workers=0 if distributed else 32,
                 pin_memory=True,
                 sampler=tra_sampler, drop_last=True),
             torch.utils.data.DataLoader(
-                val_ds, batch_size=batch, shuffle=val_sampler is None, num_workers=1 if distributed else 32,
+                val_ds, batch_size=batch, shuffle=val_sampler is None, num_workers=0 if distributed else 32,
                 pin_memory=True,
                 sampler=val_sampler, drop_last=True)
         )
@@ -204,31 +204,31 @@ def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_
             val_bs = batch
         trainloader = RoundRobinDataLoader(
             torch.utils.data.DataLoader(
-                total_trainset, batch_size=batch, shuffle=train_sampler is None, num_workers=1 if distributed else 32,
+                total_trainset, batch_size=batch, shuffle=train_sampler is None, num_workers=0 if distributed else 32,
                 pin_memory=True,
                 sampler=train_sampler, drop_last=True),
             torch.utils.data.DataLoader(
-                total_trainset, batch_size=val_bs, shuffle=train_sampler is None, num_workers=1 if distributed else 32,
+                total_trainset, batch_size=val_bs, shuffle=train_sampler is None, num_workers=0 if distributed else 32,
                 pin_memory=True,
                 sampler=train_sampler, drop_last=True)
         )
 
     else:
         trainloader = torch.utils.data.DataLoader(
-            total_trainset, batch_size=batch, shuffle=train_sampler is None, num_workers=1 if distributed else 32, pin_memory=True,
+            total_trainset, batch_size=batch, shuffle=train_sampler is None, num_workers=8 if distributed else 32, pin_memory=True,
             sampler=train_sampler, drop_last=True)
     validloader = torch.utils.data.DataLoader(
-        total_trainset, batch_size=batch, shuffle=False, num_workers=1 if distributed else 16, pin_memory=True,
+        total_trainset, batch_size=batch, shuffle=False, num_workers=0 if distributed else 16, pin_memory=True,
         sampler=valid_sampler, drop_last=False)
 
     testloader = torch.utils.data.DataLoader(
-        testset, batch_size=batch, shuffle=False, num_workers=1 if distributed else 32, pin_memory=True,
+        testset, batch_size=batch, shuffle=False, num_workers=0 if distributed else 32, pin_memory=True,
         drop_last=False, sampler=test_sampler
     )
     # We use this 'hacky' solution s.t. we do not need to keep the dataset twice in memory.
     test_total_trainset = copy_and_replace_transform(total_trainset, transform_test)
     test_trainloader = torch.utils.data.DataLoader(
-        test_total_trainset, batch_size=batch, shuffle=False, num_workers=1 if distributed else 32, pin_memory=True,
+        test_total_trainset, batch_size=batch, shuffle=False, num_workers=0 if distributed else 32, pin_memory=True,
         drop_last=False, sampler=test_train_sampler
     )
     return train_sampler, trainloader, validloader, testloader, test_trainloader, dataset_info
