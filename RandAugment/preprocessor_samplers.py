@@ -21,7 +21,7 @@ class Sampler(nn.Module):
 
 class RandAugmentationSampler(nn.Module):
     def __init__(self, hidden_dimension, num_transforms, num_scales, possible_num_sequential_transforms, q_residual, q_zero_init, scale_embs_zero_init, scale_embs_zero_strength_bias,
-                 label_smoothing_rate, distribution_functions, use_images, aug_probs, scale_logits_trainable, dataset_info):
+                 label_smoothing_rate, distribution_functions, use_images, use_labels, aug_probs, scale_logits_trainable, dataset_info):
         assert scale_logits_trainable
         super().__init__()
         self.dist, self.log_dist = distribution_functions
@@ -31,8 +31,9 @@ class RandAugmentationSampler(nn.Module):
             self.aug_logits = None
         self.op_embs = nn.Parameter(torch.normal(0., 1., (num_transforms, hidden_dimension), requires_grad=True))
         self.num_transforms_embs = nn.Parameter(torch.normal(0., 1., (len(possible_num_sequential_transforms), hidden_dimension), requires_grad=True))
+        self.has_input = use_labels or use_images
 
-        scale_embs_shape = (num_transforms,num_scales,hidden_dimension) if use_images else (num_scales,hidden_dimension)
+        scale_embs_shape = (num_transforms,num_scales,hidden_dimension) if self.has_input else (num_scales,hidden_dimension)
         if scale_embs_zero_init:
             self.scale_embs = nn.Parameter(torch.zeros(scale_embs_shape, requires_grad=True))
         else:
@@ -40,13 +41,19 @@ class RandAugmentationSampler(nn.Module):
         self.label_smoothing_rate = label_smoothing_rate
         self.q_residual = q_residual
         self.use_images = use_images
-        if use_images:
+        self.use_labels = use_labels
+        if self.use_images:
             self.normalize = transforms.Normalize(dataset_info['mean'], dataset_info['std'])
             self.convnet = SeqConvNet(hidden_dimension)
             if q_zero_init:
                 with torch.no_grad():
                     self.convnet.final_fc.weight.zero_()
                     self.convnet.final_fc.bias.zero_()
+        elif self.use_labels:
+            if q_zero_init:
+                self.q_params = nn.Parameter(torch.zeros(dataset_info['num_labels'],hidden_dimension),requires_grad=True)
+            else:
+                self.q_params = nn.Parameter(torch.normal(0.,1.,(dataset_info['num_labels'],hidden_dimension)),requires_grad=True)
         else:
             if q_zero_init:
                 self.q_param = nn.Parameter(torch.zeros(hidden_dimension, requires_grad=True))
@@ -64,22 +71,24 @@ class RandAugmentationSampler(nn.Module):
             else:
                 p.grad += p_copy.grad
 
-    def compute_q(self, imgs=None):
+    def compute_q(self, imgs=None, labels=None):
         if self.use_images:
             assert imgs is not None
             image_batch = torch.stack([self.normalize(torchvision.transforms.ToTensor()(i)) for i in imgs]).to(self.convnet.final_fc.weight.device)
             return self.convnet(image_batch)
+        elif self.use_labels:
+            return torch.stack([self.q_params[l] for l in labels])
         else:
             return self.q_param.unsqueeze(0).expand(len(imgs),-1)
 
-    def forward(self, imgs):
+    def forward(self, imgs, labels=None):
         self.imgs = imgs
         num_samples = len(imgs)
         num_ops = len(self.op_embs)
         max_num_sequential_transforms = len(self.num_transforms_embs)
         augmentation_inds = torch.randint(num_ops,(num_samples,max_num_sequential_transforms))
         self.augmentation_inds = augmentation_inds
-        self.q = self.compute_q(imgs) # num_samples x hidden
+        self.q = self.compute_q(imgs, labels) # num_samples x hidden
 
         self.num_transforms_logits = self.q @ self.num_transforms_embs.t() # num_samples x max_num_sequential_transforms
         self.p_num_transforms = self.dist(self.num_transforms_logits, -1)
@@ -162,7 +171,7 @@ class RandAugmentationSampler(nn.Module):
     def get_scale_logits(self, augmentation_inds, q):
         if q is None:
             q = self.compute_q() # images???
-        if self.use_images:
+        if self.has_input:
             hidden = q
             scale_logits = torch.einsum('bh,bosh->bos',hidden,self.scale_embs[augmentation_inds])
         else:
@@ -244,7 +253,7 @@ def update(model: RandAugmentationSampler, opt, all_rewards, ent_alpha):
 
 class NonEmbeddingRandAugmentationSampler(nn.Module):
     def __init__(self, hidden_dimension, num_transforms, num_scales, possible_num_sequential_transforms, q_residual, q_zero_init, scale_embs_zero_init, scale_embs_zero_strength_bias,
-                 label_smoothing_rate, distribution_functions, use_images, aug_probs, scale_logits_trainable, dataset_info):
+                 label_smoothing_rate, distribution_functions, use_images, use_labels, aug_probs, scale_logits_trainable, dataset_info):
         super().__init__()
         assert not use_images
         self.dist, self.log_dist = distribution_functions
@@ -272,7 +281,7 @@ class NonEmbeddingRandAugmentationSampler(nn.Module):
             else:
                 p.grad += p_copy.grad
 
-    def forward(self, imgs):
+    def forward(self, imgs, labels=None):
         num_samples = len(imgs)
         self.p_num_transforms = self.dist(self.num_transforms_logits, -1)
         self.log_p_num_transforms = self.log_dist(self.num_transforms_logits, -1)
@@ -320,10 +329,8 @@ class NonEmbeddingRandAugmentationSampler(nn.Module):
     def get_scale_entropy(self):
         log_p_scale = self.log_dist(self.scale_logits, 1)
         p_scale = self.dist(self.scale_logits, 1)
-        gpu_aug_mask_float = self.augmentation_mask.float().to(p_scale.device)
         avg_neg_entropy = (torch.einsum('os,os->o', p_scale,
-                                        log_p_scale * (p_scale != 0.)) * (1. - gpu_aug_mask_float)).sum() / (
-                                      1. - gpu_aug_mask_float).sum()  # here we could have logp = -inf and p = 0.
+                                        log_p_scale * (p_scale != 0.))).mean()  # here we could have logp = -inf and p = 0.
 
         return - avg_neg_entropy
 
@@ -342,7 +349,7 @@ class RNNAugmentationSampler(Sampler):
     The prediction in each step is sampled for each step  and the regarding embedding is fed back to the RNN.
     """
     def __init__(self, hidden_dimension, num_transforms, num_scales, possible_num_sequential_transforms, q_residual, q_zero_init, scale_embs_zero_init, scale_embs_zero_strength_bias,
-                 label_smoothing_rate, distribution_functions, use_images, aug_probs, scale_logits_trainable, dataset_info):
+                 label_smoothing_rate, distribution_functions, use_images, use_labels, aug_probs, scale_logits_trainable, dataset_info):
         super().__init__()
         self.possible_num_sequential_transforms = possible_num_sequential_transforms
 
@@ -398,7 +405,7 @@ class RNNAugmentationSampler(Sampler):
 
 class SimpleAugmentationSampler(Sampler):
     def __init__(self, hidden_dimension, num_transforms, num_scales, possible_num_sequential_transforms, q_residual, q_zero_init, scale_embs_zero_init, scale_embs_zero_strength_bias,
-                 label_smoothing_rate, distribution_functions, use_images, aug_probs, scale_logits_trainable, dataset_info):
+                 label_smoothing_rate, distribution_functions, use_images, use_labels, aug_probs, scale_logits_trainable, dataset_info):
         super().__init__()
         self.possible_num_sequential_transforms = possible_num_sequential_transforms
 

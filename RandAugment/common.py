@@ -3,6 +3,7 @@ import warnings
 import random
 from copy import copy
 from typing import Union
+from collections import Counter
 
 import numpy as np
 import torch
@@ -50,7 +51,7 @@ def get_gradients(model, copy=False):
         g = param.grad
         if copy:
             g = g.clone()
-        grad_list.append(param.grad)
+        grad_list.append(g)
     return grad_list
 
 def recursive_backpack_memory_cleanup(module: torch.nn.Module):
@@ -146,6 +147,17 @@ def relabssum(logits, d):
 def log_relabssum(logits, d):
     return torch.log(relabssum(logits,d))
 
+def le_softmax(logits, d):
+    d = d % len(logits.shape)
+    sm_probs = logits.softmax(d)
+    sm_probs_over_count = sm_probs/(torch.arange(logits.shape[d])+1.).view(-1,*([1]*(len(logits.shape)-d-1))).to(logits.device)
+    p = sm_probs_over_count.flip(d).cumsum(d).flip(d)
+    return p
+
+def log_le_softmax(logits, d):
+    return torch.log(le_softmax(logits,d))
+
+
 alpha = .1
 
 def exploresoftmax(logits, d):
@@ -228,6 +240,23 @@ class RoundRobinDataLoader:
         self.steps += 1
         return b
 
+class RepeatDataLoader:
+    def __init__(self, *args, batch_size=None, repeats=1, **kwargs):
+        assert (batch_size//repeats)*repeats == batch_size, f'repeats needs to divide batch size we do not have {repeats} | {batch_size}.'
+        self.loader = torch.utils.data.DataLoader(*args, batch_size=batch_size//repeats, **kwargs)
+        self.repeats = repeats
+        self.batch_size = batch_size
+
+    def __len__(self):
+        return len(self.loader)
+
+    def __iter__(self):
+        def repeat(batched_tensor):
+            repeat_counts = [1 for _ in range(batched_tensor.dim()+1)]
+            repeat_counts[1] = self.repeats
+            return batched_tensor.unsqueeze(1).repeat(repeat_counts).view((-1,)+batched_tensor.shape[1:])
+        return (tuple(repeat(t) for t in b) for b in self.loader)
+
 def copy_and_replace_transform(ds: Union[CIFAR10, ImageFolder, Subset], transform):
     assert ds.dataset.transform is not None if isinstance(ds,Subset) else ds.transform is not None # make sure still uses old style transform
     if isinstance(ds, Subset):
@@ -265,3 +294,35 @@ class HWCByteTensorToPILImage():
         return self.__class__.__name__ + '()'
 
 
+def shufflelist_with_seed(lis, seed='2020'):
+    s = random.getstate()
+    random.seed(seed)
+    random.shuffle(lis)
+    random.setstate(s)
+
+def stratified_split(labels, val_share):
+    assert isinstance(labels, list)
+    counter = Counter(labels)
+    indices_per_label = {label: [i for i,l in enumerate(labels) if l == label] for label in counter}
+    per_label_split = {}
+    for label, count in counter.items():
+        indices = indices_per_label[label]
+        assert count == len(indices)
+        shufflelist_with_seed(indices, f'2020_{label}_{count}')
+        train_val_border = round(count*(1.-val_share))
+        per_label_split[label] = (indices[:train_val_border], indices[train_val_border:])
+    final_split = ([],[])
+    for label, split in per_label_split.items():
+        for f_s, s in zip(final_split, split):
+            f_s.extend(s)
+    shufflelist_with_seed(final_split[0], '2020_yoyo')
+    shufflelist_with_seed(final_split[1], '2020_yo')
+    return final_split
+
+def doubly_stratified_split(labels, train_share, val_share):
+    rest_share = 1.-train_share
+    rest_split, train_split = stratified_split(labels, train_share)
+    rest_labels = [labels[idx] for idx in rest_split]
+    _, val_split = stratified_split(rest_labels, val_share/rest_share)
+    val_split = [rest_split[idx] for idx in val_split]
+    return train_split, val_split

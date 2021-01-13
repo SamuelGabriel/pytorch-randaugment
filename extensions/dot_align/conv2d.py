@@ -7,15 +7,17 @@ from extensions.dot_align.utils import StatehandlingMeta
 
 
 class DotAlignConv2d(BatchGradBase, StatehandlingMeta):
-    def __init__(self,align_func,align_func_vec,align_func_conv,state,align_with_next=False):
+    def __init__(self,align_func,align_func_vec,align_func_conv,state,align_with_next=False, opt=None):
         super().__init__(derivatives=Conv2DDerivatives(), params=["bias", "weight"])
         self.align_func = align_func
         self.align_func_vec = align_func_vec
         self.align_func_conv = align_func_conv
         self.state = state
         self.align_with_next = align_with_next
+        self.opt = opt
 
     def bias(self, ext, module, g_inp, g_out, bpquantities):
+        assert self.opt is None, 'Not implemented'
         comparison_grad_batch = super().bias(ext, module, g_inp, g_out, bpquantities)
         grad_batch,comparison_grad_batch = self.handle_state(self.state, 'bias_state', module, comparison_grad_batch)
         if grad_batch is None:
@@ -23,6 +25,7 @@ class DotAlignConv2d(BatchGradBase, StatehandlingMeta):
         return self.align_func(grad_batch, comparison_grad_batch)
 
     def weight(self, ext, module, g_inp, g_out, bpquantities):
+        assert self.opt is None, 'Not implemented'
         o_input0, o_g_out, c_input0, c_g_out = self.handle_state(self.state,'weight_state', module, module.input0, g_out)
         if o_input0 is None:
             return None

@@ -43,7 +43,7 @@ def curves_to_matrix(curves):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Get Top1 Results.')
-    parser.add_argument('--logdir', default='logs3')
+    parser.add_argument('--logdir', default='logs5')
     parser.add_argument('--out-logdir', default='/tmp/logs3av')
     args = parser.parse_args()
 

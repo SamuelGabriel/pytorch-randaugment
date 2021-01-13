@@ -1,0 +1,28 @@
+model:
+  type: resnet50
+dataset: imagenet
+aug: randaugment
+augmentation_search_space: fixed_standard
+randaug:
+  N: 0
+  M: 0    # from appendix
+cutout: 0
+batch: 32
+gpus: 32
+epoch: 270
+lr: .4 # at top 1.6
+lr_schedule:
+  type: 'resnet'
+  warmup:
+    multiplier: 4
+    epoch: 3
+optimizer:
+  type: sgd
+  nesterov: True
+  decay: 0.0001
+  clip: 0
+
+
+communicate_grad_every: 4
+step_optimizer_every: 4
+step_optimizer_nth_step: 3

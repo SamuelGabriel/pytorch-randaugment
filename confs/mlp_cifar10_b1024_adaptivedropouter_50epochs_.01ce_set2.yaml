@@ -1,0 +1,50 @@
+model:
+  type: mlp
+  adaptive_dropouter:
+    hidden_size: 10
+    relu: true
+    simple_dropout: false
+    out_bias: true
+    target_p: .9
+    cross_entropy_alpha: .01
+    inference_dropout: false
+    tanh: false
+    batch_norm: false
+    ppo: false
+    scale_by_p: true
+    scale_lr_with_outer_opt: true
+
+dataset: cifar10
+aug: randaugment
+randaug:
+  N: 0
+  M: 0
+cutout: 0
+batch: 1024
+gpus: 1
+epoch: 50
+lr_set: [0.025, 0.0125, 0.1, 0.2, 0.4]
+lr_schedule:
+  type: 'cosine'
+  warmup:
+    multiplier: 2
+    epoch: 2
+optimizer:
+  type: sgd
+  nesterov: True
+  decay: 0.0005
+
+
+alignment_loss:
+  summation: standard
+  align_with: '2'
+  val_share: .0
+  alignment_type: dot
+
+meta_opt:
+  meta_optimizer:
+    type: adam
+    lr_set: [.0, .1, .2, .05]
+    beta1: .9
+    beta2: .999
+

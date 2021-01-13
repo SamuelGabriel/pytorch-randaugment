@@ -3,9 +3,11 @@ import random
 
 import torch
 from torch import nn
+from torchvision import transforms, utils, datasets
 
 from RandAugment.preprocessors import StandardCIFARPreprocessor, ImagePreprocessor
 from RandAugment import google_augmentations
+from RandAugment.common import HWCByteTensorToPILImage, PILImageToHWCByteTensor, sigmax
 
 class Augmenter(nn.Module):
     def __init__(self, hidden_dimension, dataset_info):
@@ -24,6 +26,41 @@ class Augmenter(nn.Module):
         out = self.conv2(activated)
         return self.bn(out*self.alpha+imgs)
 
+    def log(self, writer, t):
+        pass
+
+def denormalize(img, mean, std):
+    mean, std = torch.tensor(mean), torch.tensor(std)
+    return img.mul_(std[:,None,None]).add_(mean[:,None,None])
+
+def normalize(imgs, mean, std):
+    mean, std = torch.tensor(mean), torch.tensor(std)
+    return imgs.sub_(mean[:,None,None]).div_(std[:,None,None])
+
+class RestrictedAugmenter(nn.Module):
+    def __init__(self, dataset_info):
+        super().__init__()
+        self.weight_tranform = lambda w: torch.softmax(w,0)
+        num_augs = google_augmentations.num_augmentations()
+        weights = torch.zeros(num_augs)
+        weights[0] = 1. # at init this leads to behaviour like no augmentation was used
+        self.weights = nn.Parameter(weights)
+        self.dataset_info = dataset_info
+
+
+    def forward(self, imgs):
+        imgs = [transforms.ToPILImage()(denormalize(img, self.dataset_info['mean'], self.dataset_info['std'])) for img in imgs]
+        rg = lambda: random.randint(0,google_augmentations.PARAMETER_MAX)
+        augmented_images = torch.stack([torch.stack([transforms.ToTensor()(google_augmentations.apply_augmentation(aug_idx, rg(), img)) for aug_idx in range(google_augmentations.num_augmentations())]) for img in imgs])
+        augmented_images = augmented_images * self.weight_tranform(self.weights)[:,None,None,None]
+        augmented_images = augmented_images.sum(1)
+        return normalize(augmented_images, self.dataset_info['mean'], self.dataset_info['std'])
+
+    def log(self, writer, t):
+        for i, w in enumerate(self.weight_tranform(self.weights)):
+            writer.add_scalar(f'AugProb/weightofaug{i}', w, t)
+
+
 class DifferentiableLearnedPreprocessor(ImagePreprocessor):
     def __init__(self, dataset_info, hidden_dimension, optimizer_creator, cutout=0,
                  uniaug_val=False, old_preprocessor_val=False,
@@ -31,7 +68,10 @@ class DifferentiableLearnedPreprocessor(ImagePreprocessor):
         super().__init__(**kwargs)
         print('using learned preprocessor')
 
-        self.augmenter = Augmenter(hidden_dimension,dataset_info)
+        if hidden_dimension == 0:
+            self.augmenter = RestrictedAugmenter(dataset_info)
+        else:
+            self.augmenter = Augmenter(hidden_dimension,dataset_info)
         self.standard_cifar_preprocessor = StandardCIFARPreprocessor(dataset_info, cutout=cutout,
                                                                      device=self.device)
 
@@ -65,7 +105,9 @@ class DifferentiableLearnedPreprocessor(ImagePreprocessor):
             return [[(0,1.)] for i in imgs]
 
 
-    def forward(self, imgs, step, validation_step=False):
+    def forward(self, imgs, step, validation_step=False, labels=None):
+        if not hasattr(self, 'comparison_images'):
+            self.comparison_images = imgs[:10]
         self.t = step
         if self.training:
             if validation_step:
@@ -112,5 +154,9 @@ class DifferentiableLearnedPreprocessor(ImagePreprocessor):
 
     def write_summary(self, step):
         if step % 101 == 0 and self.summary_writer is not None and self.training:
+            self.augmenter.log(self.summary_writer, step)
             with torch.no_grad():
-                pass
+                imgs = self.standard_cifar_preprocessor(self.comparison_images, step)
+                t_imgs = denormalize(self.augmenter(imgs), self.augmenter.dataset_info['mean'], self.augmenter.dataset_info['std'])
+                self.summary_writer.add_image('augmented_images', utils.make_grid(t_imgs), step)
+

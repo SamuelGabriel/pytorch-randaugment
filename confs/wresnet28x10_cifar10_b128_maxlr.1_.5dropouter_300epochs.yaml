@@ -21,7 +21,8 @@ meta_opt:
     beta2: .999
 
 batch: 128
-epoch: 300
+gpus: 1
+epoch: 200
 lr: 0.05
 lr_schedule:
   type: 'cosine'

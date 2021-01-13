@@ -1,0 +1,64 @@
+model:
+  type: resnet50
+dataset: imagenet
+aug: randaugment
+augmentation_search_space: long_wide
+randaug:
+  N: 0
+  M: 0    # from appendix
+cutout: 0
+batch: 32
+gpus: 32
+epoch: 270
+lr: .4 # at top 1.6
+lr_schedule:
+  type: 'resnet'
+  warmup:
+    multiplier: 4
+    epoch: 3
+optimizer:
+  type: sgd
+  nesterov: True
+  decay: 0.0001
+  clip: 0
+
+preprocessor:
+  type: learned_random_randaugmentspace
+  entropy_alpha: 0.
+  hidden_dim: 1
+  scale_entropy_alpha: .0
+  online_tests_on_model: false
+  q_zero_init: true
+  q_residual: false
+  scale_embs_zero_init: true
+  normalize_reward: false # needs to be false since we only have a single reward here!
+  importance_sampling: false
+  label_smoothing_rate: .0
+  possible_num_sequential_transforms: [1,2,3,4]
+  sigmax_dist: false
+  use_images_for_sampler: false
+  uniaug_val: false
+  oldpreprocessor_val: false
+  exploresoftmax_dist: false
+  aug_probs: true
+  non_embedding_sampler: true
+  scale_trainable: true
+
+alignment_loss:
+  summation: standard
+  align_with: '2'
+  val_share: .0
+  alignment_type: dot
+  has_val_steps: true
+
+meta_opt:
+  meta_optimizer:
+    type: adam
+    lr: .1
+    beta1: .9
+    beta2: .999
+
+
+communicate_grad_every: 4
+step_optimizer_every: 4
+step_optimizer_nth_step: 3

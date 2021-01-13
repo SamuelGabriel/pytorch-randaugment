@@ -6,16 +6,22 @@ import time
 from RandAugment.common import CheckpointFunctionForSampler, recursive_backpack_memory_cleanup, replace_parameters
 
 class Sampler(nn.Module):
-    def __init__(self, num_dropouts, hidden_dimension, out_bias=False, relu=True, tanh=False, batch_norm=False):
+    def __init__(self, num_dropouts, hidden_dimension, out_bias=False, relu=True, tanh=False, batch_norm=False,
+                 shared_prob=False, only_train_last_bias=False, p=None):
         super().__init__()
         assert not (relu and tanh)
         activation = lambda: nn.ReLU() if relu else (nn.Tanh() if tanh else nn.Identity())
-        self.get_keep_logits = nn.Sequential(
+        self.get_keep_logits_network = nn.Sequential(
             nn.LayerNorm(num_dropouts) if batch_norm else nn.Identity(),
             nn.Linear(num_dropouts,hidden_dimension,bias=False),
             activation(),
-            nn.Linear(hidden_dimension,num_dropouts,bias=out_bias),
+            nn.Linear(hidden_dimension,1 if shared_prob else num_dropouts,bias=out_bias),
         )
+        with torch.no_grad():
+            self.get_keep_logits_network[-1].bias.zero_()
+            self.get_keep_logits_network[-1].weight.zero_()
+            if p is not None:
+                self.get_keep_logits_network[-1].bias.add_(torch.log(torch.tensor(p/(1-p))))
         # before using unsqueeze(0) s.t. it can operate over the batch
         self.critic = nn.Sequential(
             nn.LayerNorm(num_dropouts*2) if batch_norm else nn.Identity(),
@@ -26,9 +32,21 @@ class Sampler(nn.Module):
             nn.Linear(hidden_dimension,1)
         )
         # initialize last layer to zero s.t. the initial value predicted by critic is 0
+        self.num_dropouts = num_dropouts
+        self.only_train_last_bias = only_train_last_bias
         with torch.no_grad():
             self.critic[-1].weight.zero_()
             self.critic[-1].bias.zero_()
+
+    def get_keep_logits(self,state):
+        assert len(state.shape) == 2
+        if self.only_train_last_bias:
+            l = self.get_keep_logits_network[-1].bias.unsqueeze(0).repeat(len(state),1)
+        else:
+            l = self.get_keep_logits_network(state)
+        if l.shape[-1] == 1:
+            return l.repeat(1,self.num_dropouts)
+        return l
 
     def forward(self, state):
         self.inputs = state
@@ -150,7 +168,7 @@ def update(model: Sampler, opt, all_rewards, ent_alpha):
 
 
 class AdaptiveDropouter(nn.Module):
-    def __init__(self, dropout_shape, hidden_dimension, optimizer_creator, train_bs, val_bs, cross_entropy_alpha=None, target_p=None, out_bias=False, relu=True, tanh=False, inference_dropout=False, scale_by_p=False, batch_norm=False, ppo=False, summary_writer=None):
+    def __init__(self, dropout_shape, hidden_dimension, optimizer_creator, train_bs, val_bs, cross_entropy_alpha=None, target_p=None, out_bias=False, relu=True, tanh=False, inference_dropout=False, scale_by_p=False, batch_norm=False, ppo=False, scale_lr_with_outer_opt=False, share_prob=False, train_only_bias=False, summary_writer=None):
         super().__init__()
         self.target_p = target_p
         self.cross_entropy_alpha = cross_entropy_alpha
@@ -161,11 +179,12 @@ class AdaptiveDropouter(nn.Module):
         self.train_bs = train_bs
         self.val_bs = val_bs
         self.ppo = ppo
+        self.scale_lr_with_outer_opt = scale_lr_with_outer_opt
 
         if isinstance(dropout_shape,tuple):
             self.sampler = ConvSampler(dropout_shape, hidden_dimension, out_bias=out_bias, relu=relu, batch_norm=batch_norm)
         else:
-            self.sampler = Sampler(dropout_shape,hidden_dimension,out_bias=out_bias, relu=relu, tanh=tanh, batch_norm=batch_norm)
+            self.sampler = Sampler(dropout_shape,hidden_dimension,out_bias=out_bias, relu=relu, tanh=tanh, batch_norm=batch_norm, shared_prob=share_prob, only_train_last_bias=train_only_bias, p=target_p if cross_entropy_alpha else None)
         self.sampler_copies = []
 
         self.optimizer = optimizer_creator(self.sampler.parameters())
@@ -203,10 +222,11 @@ class AdaptiveDropouter(nn.Module):
             rewards = (rewards - torch.mean(rewards)) / torch.std(rewards)
         return rewards
 
-    def step(self, rewards):
-        assert len(self.sampler_copies) == 2
+    def step(self, rewards, curr_lr_factor):
+        assert len(self.sampler_copies) <= 2
         sampler = self.sampler_copies.pop(0)  # pops the oldest state first (queue-style)
         if self.t % 100 == 50 and self.summary_writer is not None and self.training:
+            print('step')
             self.summary_writer.add_scalar(f'Alignment/AverageAlignment', rewards.mean(), self.t)
             self.summary_writer.add_scalar(f'Alignment/MaxAlignment', rewards.max(), self.t)
             self.summary_writer.add_scalar(f'Alignment/MinAlignment', rewards.min(), self.t)
@@ -233,7 +253,13 @@ class AdaptiveDropouter(nn.Module):
             torch.nn.utils.clip_grad_value_(sampler.parameters(), 5.)
             self.sampler.zero_grad()
             self.sampler.add_grad_of_copy(sampler)
+            assert len(self.optimizer.param_groups) == 1
+            base_lr = self.optimizer.param_groups[0]['lr']
+            assert isinstance(base_lr, float), type(base_lr)
+            if self.scale_lr_with_outer_opt:
+                self.optimizer.param_groups[0]['lr'] *= curr_lr_factor
             self.optimizer.step()
+            self.optimizer.param_groups[0]['lr'] = base_lr
         for p in self.sampler.parameters():
             p.grad = None
         del sampler
@@ -245,6 +271,9 @@ class AdaptiveDropouter(nn.Module):
         self.sampler_copies = []
 
     def write_summary(self, sampler, keep_mask, step):
+        if step%100 == 0:
+            print('average logp',sampler.logps.mean().item())
+            print('keep share', keep_mask.float().mean())
         if step % 100 == 0 and self.summary_writer is not None and self.training:
             with torch.no_grad():
                 self.summary_writer.add_scalar(f'Dropouter/average_logp', sampler.logps.mean(), step)

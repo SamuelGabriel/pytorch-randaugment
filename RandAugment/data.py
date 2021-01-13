@@ -14,8 +14,9 @@ from sklearn.model_selection import StratifiedShuffleSplit
 from theconf import Config as C
 
 from RandAugment.augmentations import *
-from RandAugment.common import get_logger, RoundRobinDataLoader, copy_and_replace_transform, PILImageToHWCByteTensor
+from RandAugment.common import get_logger, RoundRobinDataLoader, copy_and_replace_transform, PILImageToHWCByteTensor, stratified_split, RepeatDataLoader
 from RandAugment.dataset.noised_cifar10 import NoisedCIFAR10, TargetNoisedCIFAR10
+from RandAugment.dataset.subsampled_cifar100 import get_fiftyexample_CIFAR100_trainandval, get_tenclass_CIFAR100_trainandval
 from RandAugment.imagenet import ImageNet
 
 from RandAugment.augmentations import Lighting
@@ -35,7 +36,8 @@ _CIFAR_MEAN, _CIFAR_STD = (0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010) # t
 # mean für cifar 100: tensor([0.5071, 0.4866, 0.4409])
 
 
-def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_optimizer_factory=None, distributed=False, summary_writer=None):
+def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_optimizer_factory=None, distributed=False, started_with_spawn=False, summary_writer=None):
+    print(f'started with spawn {started_with_spawn}')
     dataset_info = {}
     if 'cifar' in dataset or 'svhn' in dataset:
         transform_train = transforms.Compose([
@@ -51,6 +53,7 @@ def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_
         dataset_info['mean'] = _CIFAR_MEAN
         dataset_info['std'] = _CIFAR_STD
         dataset_info['img_dims'] = (3,32,32)
+        dataset_info['num_labels'] = 100 if '100' in dataset and 'ten' not in dataset else 10
     elif 'imagenet' in dataset:
         transform_train = transforms.Compose([
             transforms.RandomResizedCrop(224, scale=(0.08, 1.0), interpolation=Image.BICUBIC),
@@ -74,6 +77,7 @@ def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_
         dataset_info['mean'] = [0.485, 0.456, 0.406]
         dataset_info['std'] = [0.229, 0.224, 0.225]
         dataset_info['img_dims'] = (3,224,224)
+        dataset_info['num_labels'] = 1000
     else:
         raise ValueError('dataset=%s' % dataset)
 
@@ -119,6 +123,10 @@ def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_
     elif dataset == 'cifar100':
         total_trainset = torchvision.datasets.CIFAR100(root=dataroot, train=True, download=True, transform=transform_train)
         testset = torchvision.datasets.CIFAR100(root=dataroot, train=False, download=True, transform=transform_test)
+    elif dataset == 'tenclass_cifar100':
+        total_trainset, testset = get_tenclass_CIFAR100_trainandval(root=dataroot, download=True, transform=transform_train)
+    elif dataset == 'fiftyexample_cifar100':
+        total_trainset, testset = get_fiftyexample_CIFAR100_trainandval(root=dataroot, download=True, transform=transform_train)
     elif dataset == 'svhn':
         trainset = torchvision.datasets.SVHN(root=dataroot, split='train', download=True, transform=transform_train)
         extraset = torchvision.datasets.SVHN(root=dataroot, split='extra', download=True, transform=transform_train)
@@ -137,8 +145,10 @@ def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_
 
     if 'throwaway_share_of_ds' in C.get():
         assert 'val_step_trainloader_val_share' not in C.get()
-        share = C.get()['throwaway_share_of_ds']
-        train_subset_inds, _ = stratified_split(total_trainset.targets,share)
+        share = C.get()['throwaway_share_of_ds']['throwaway_share']
+        train_subset_inds, rest_inds = stratified_split(total_trainset.targets,share)
+        if C.get()['throwaway_share_of_ds']['use_throwaway_as_val']:
+            testset = copy_and_replace_transform(Subset(total_trainset, rest_inds), transform_test)
         total_trainset = Subset(total_trainset, train_subset_inds)
 
     train_sampler = None
@@ -212,23 +222,27 @@ def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_
                 pin_memory=True,
                 sampler=train_sampler, drop_last=True)
         )
-
+    elif 'repeat_trainloader' in C.get():
+        trainloader = RepeatDataLoader(
+            total_trainset, batch_size=batch, shuffle=train_sampler is None, num_workers=0 if started_with_spawn else 8,
+            pin_memory=True, repeats=C.get()['repeat_trainloader']['repeats'],
+            sampler=train_sampler, drop_last=True)
     else:
         trainloader = torch.utils.data.DataLoader(
-            total_trainset, batch_size=batch, shuffle=train_sampler is None, num_workers=8 if distributed else 32, pin_memory=True,
+            total_trainset, batch_size=batch, shuffle=train_sampler is None, num_workers=0 if distributed else 32, pin_memory=True,
             sampler=train_sampler, drop_last=True)
     validloader = torch.utils.data.DataLoader(
-        total_trainset, batch_size=batch, shuffle=False, num_workers=0 if distributed else 16, pin_memory=True,
+        total_trainset, batch_size=batch, shuffle=False, num_workers=0 if started_with_spawn else 8, pin_memory=True,
         sampler=valid_sampler, drop_last=False)
 
     testloader = torch.utils.data.DataLoader(
-        testset, batch_size=batch, shuffle=False, num_workers=0 if distributed else 32, pin_memory=True,
+        testset, batch_size=batch, shuffle=False, num_workers=0 if started_with_spawn else 8, pin_memory=True,
         drop_last=False, sampler=test_sampler
     )
     # We use this 'hacky' solution s.t. we do not need to keep the dataset twice in memory.
     test_total_trainset = copy_and_replace_transform(total_trainset, transform_test)
     test_trainloader = torch.utils.data.DataLoader(
-        test_total_trainset, batch_size=batch, shuffle=False, num_workers=0 if distributed else 32, pin_memory=True,
+        test_total_trainset, batch_size=batch, shuffle=False, num_workers=0 if started_with_spawn else 8, pin_memory=True,
         drop_last=False, sampler=test_train_sampler
     )
     return train_sampler, trainloader, validloader, testloader, test_trainloader, dataset_info
@@ -250,31 +264,6 @@ class SubsetSampler(Sampler):
     def __len__(self):
         return len(self.indices)
 
-
-def shufflelist_with_seed(lis, seed='2020'):
-    s = random.getstate()
-    random.seed(seed)
-    random.shuffle(lis)
-    random.setstate(s)
-
-def stratified_split(labels, val_share):
-    assert isinstance(labels, list)
-    counter = Counter(labels)
-    indices_per_label = {label: [i for i,l in enumerate(labels) if l == label] for label in counter}
-    per_label_split = {}
-    for label, count in counter.items():
-        indices = indices_per_label[label]
-        assert count == len(indices)
-        shufflelist_with_seed(indices, f'2020_{label}_{count}')
-        train_val_border = round(count*(1.-val_share))
-        per_label_split[label] = (indices[:train_val_border], indices[train_val_border:])
-    final_split = ([],[])
-    for label, split in per_label_split.items():
-        for f_s, s in zip(final_split, split):
-            f_s.extend(s)
-    shufflelist_with_seed(final_split[0], '2020_yoyo')
-    shufflelist_with_seed(final_split[1], '2020_yo')
-    return final_split
 
 
 

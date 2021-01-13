@@ -18,9 +18,9 @@ class Sampler(torch.nn.Module):
         self.logits = torch.nn.Parameter(torch.zeros(num_subsets), requires_grad=True)  # keep on cpu, since small
 
     def forward(self, bs):
-        self.p = sigmax(self.logits, 0)
+        self.p = torch.softmax(self.logits, 0)
         self.sample = torch.multinomial(self.p, bs, replacement=True)
-        self.logps = log_sigmax(self.logits[self.sample], 0)
+        self.logps = torch.log_softmax(self.logits[self.sample], 0)
         return self.sample
 
     def add_grad_of_copy(self, copy):
@@ -39,7 +39,7 @@ class AdaptiveLoaderByLabel():
         self.val_bs = val_bs
         if val_bs:
             self.val_loader = torch.utils.data.DataLoader(
-                self.ds, batch_size=val_bs, shuffle=True, num_workers=16, pin_memory=False,
+                self.ds, batch_size=val_bs, shuffle=True, num_workers=0, pin_memory=False,
                 sampler=None, drop_last=False)
         else:
             self.val_loader = []
@@ -91,7 +91,7 @@ class AdaptiveLoaderByLabel():
         rewards = (rewards - torch.mean(rewards)) / torch.std(rewards)
         return rewards
 
-    def step(self, rewards):
+    def step(self, rewards, step_optimizer=True):
         assert len(self.sampler_copies) <= 2
         sampler = self.sampler_copies.pop(0)
         self.num_uses_of_partitions.scatter_add_(0, sampler.sample.cpu(), torch.ones_like(sampler.sample.cpu()))
@@ -115,9 +115,10 @@ class AdaptiveLoaderByLabel():
 
         loss.backward()
         torch.nn.utils.clip_grad_value_(sampler.parameters(), 5.)
-        self.sampler.zero_grad()
         self.sampler.add_grad_of_copy(sampler)
-        self.optimizer.step()
+        if step_optimizer:
+            self.optimizer.step()
+            self.sampler.zero_grad()
 
     def reset_state(self):
         del self.sampler_copies

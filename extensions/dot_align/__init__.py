@@ -72,7 +72,7 @@ class ComputeAlignmentVec():
                 return dot_prod/(squared_grad_norm*squared_grad_norms).sqrt()
         return dot_prod
 
-    def __call__(self, X, dE_dY, comparison_X, comparison_dE_dY, curr_grad=None):
+    def __call__(self, X, dE_dY, comparison_X, comparison_dE_dY, curr_grad=None, optimizer_factor=None):
         if self.val_bs:
             comparison_X = comparison_X[self.bs-self.val_bs:]
             comparison_dE_dY = comparison_dE_dY[self.bs-self.val_bs:]
@@ -96,6 +96,8 @@ class ComputeAlignmentVec():
                     comparison_this_X = comparison_this_X/squared_grad_norms.sqrt().unsqueeze_(1).unsqueeze_(1)
                 comparison_grad = comparison_grad - contract("noi,nai->oa", comparison_this_dE_dY, comparison_this_X)
         #print('comp comp grad', comparison_grad.numel(), comparison_grad.flatten())
+        if optimizer_factor is not None:
+            comparison_grad *= optimizer_factor
 
         ga = self.grad_alignment(comparison_grad, X, dE_dY)
         return ga
@@ -185,7 +187,7 @@ class DotAlignment(BackpropExtension):
         if val_bs:
             print("Oooh! Validation batch is not tested!")
 
-    def __init__(self,bs,val_bs,state,remove_me_summation,normalized_summation,cossim,align_with='1',use_slow_version=False):
+    def __init__(self,bs,val_bs,state,remove_me_summation,normalized_summation,cossim,align_with='1',use_slow_version=False,optimizer=None):
         assert align_with in ('1','2','2-1')
         self.warn(val_bs)
         alignment_function = ComputeAlignment(bs,val_bs,remove_me_summation,normalized_summation,cossim,align_with=='2-1')
@@ -195,8 +197,8 @@ class DotAlignment(BackpropExtension):
             savefield="grad_alignments",
             fail_mode="WARNING",
             module_exts={
-                Linear: linear.DotAlignLinear(alignment_function,alignment_function_vec,state,align_with_next='2' in align_with),
-                Conv2d: conv2d.DotAlignConv2d(alignment_function,alignment_function_vec,None if use_slow_version else alignment_function_conv(),state,align_with_next='2' in align_with),
+                Linear: linear.DotAlignLinear(alignment_function,alignment_function_vec,state,align_with_next='2' in align_with,opt=optimizer),
+                Conv2d: conv2d.DotAlignConv2d(alignment_function,alignment_function_vec,None if use_slow_version else alignment_function_conv(),state,align_with_next='2' in align_with, opt=optimizer),
                 #BatchNorm1d: batchnorm1d.DotAlignBatchNorm1d(alignment_function),
             },
         )

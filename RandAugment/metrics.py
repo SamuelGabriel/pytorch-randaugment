@@ -86,3 +86,6 @@ class SummaryWriterDummy:
 
     def add_scalar(self, *args, **kwargs):
         pass
+
+    def add_image(self, *args, **kwargs):
+        pass

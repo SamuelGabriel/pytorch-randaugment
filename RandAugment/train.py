@@ -8,11 +8,12 @@ import gc
 import sys
 import resource
 import tempfile
+import pickle
+from dataclasses import dataclass
 import random
 from time import time
 
-
-
+import numpy as np
 import torch
 from torch import nn, optim
 import torch.distributed as dist
@@ -22,6 +23,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import torchvision
 
 from tqdm import tqdm
+import yaml
 from theconf import Config as C, ConfigArgumentParser
 from argparse import ArgumentParser
 from backpack import backpack, extend, memory_cleanup
@@ -33,6 +35,7 @@ from RandAugment.data import get_dataloaders
 from RandAugment.lr_scheduler import adjust_learning_rate_resnet
 from RandAugment.metrics import accuracy, Accumulator
 from RandAugment.networks import get_model, num_class
+from RandAugment.optimizers import AdaBelief, RAdam
 from RandAugment.preprocessors import LearnedPreprocessorRandaugmentSpace, get_standard_preprocessor, LearnedRandAugmentPreprocessor, LearnedPreprocessorEnsemble
 from RandAugment.differentiable_preprocessor import DifferentiableLearnedPreprocessor
 from warmup_scheduler import GradualWarmupScheduler
@@ -117,22 +120,29 @@ def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='
     has_val_steps = C.get().get('alignment_loss', {}).get('has_val_steps', False)
     finite_difference_loss = C.get().get('finite_difference_loss', {})
     model_meta_gradient = C.get().get('model_meta_gradient', False)
+    communicate_grad_every = C.get().get('communicate_grad_every', 1)
     if finite_difference_loss: has_val_steps = True
     if 'next_step_loss' in C.get(): has_val_steps = True
     before_load_time = time()
     for batch in logging_loader: # logging loader might be a loader or a loader wrapped into tqdm
-        print(f'full step time {time()-before_load_time}')
+        #print(f'full step time {time()-before_load_time}')
+        #print(f'step {steps}')
         before_load_time = time()
         data, label = batch[:2]
         steps += 1
         stime = time()
         if preprocessor:
-            print(f'pre back transform {time() - stime} data on {data.device}')
+            #print(f'pre back transform {time() - stime} data on {data.device}')
             data = [HWCByteTensorToPILImage()(ti) for ti in data]
-            print(f'back transform {time() - stime}')
-            data = preprocessor(data,int((epoch - 1) * total_steps) + steps, validation_step=(has_val_steps and steps % 2 == 0))
+            #print(f'back transform {time() - stime}')
+            step_is_val_step = (has_val_steps and ((steps-1)//communicate_grad_every) % 2 == 1)
+            next_step_is_val_step = (has_val_steps and ((steps)//communicate_grad_every) % 2 == 1)
+            if next_step_is_val_step and not step_is_val_step and communicate_grad_every > 1:
+                preprocessor.reset_state()
+            data = preprocessor(data,int((epoch - 1) * total_steps) + steps, validation_step=step_is_val_step, labels=label)
+            #print(f'val step {(has_val_steps and ((steps-1)//communicate_grad_every) % 2 == 1)}')
         #print(f'Preprocessor time {time()-stime}',file=sys.stderr)
-        print(f'{data.device} preprocess time {time()-stime}')
+        #print(f'{data.device} preprocess time {time()-stime}')
         if worldsize > 1:
             data, label = data.to(rank), label.to(rank)
         else:
@@ -150,7 +160,6 @@ def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='
             elif model_meta_gradient:
                 old_grads = get_gradients(model, copy=True)
 
-        communicate_grad_every = C.get().get('communicate_grad_every', 1)
         communicate_grad = steps % communicate_grad_every == 0
         just_communicated_grad = steps % communicate_grad_every == 1 # also is true in first step of each epoch
         if optimizer and (communicate_grad_every == 1 or just_communicated_grad):
@@ -158,7 +167,7 @@ def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='
 
         #print('mem usage before forward', torch.cuda.memory_allocated()/1000//1000, "MB")
         recursive_backpack_memory_cleanup(model)
-        print(f' til cleanup time {time()-stime}')
+        #print(f' til cleanup time {time()-stime}')
         fb_time = time()
         preds = model(data)
         if 'test' in desc_default:
@@ -167,8 +176,7 @@ def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='
         #print('mem usage before backward', torch.cuda.memory_allocated()/1000//1000, "MB")
         val_batch = C.get().get('val_batch',0)
         if optimizer:
-            if 'alignment_loss' in C.get():
-                assert communicate_grad_every == 1
+            if 'alignment_loss' in C.get() and (steps-1)%communicate_grad_every == communicate_grad_every-1:
                 alignment_loss_flags = C.get()['alignment_loss']
                 if worldsize > 1:
                     with backpack(DistributedDotAlignment(len(data),0,backpack_state, 'cossim' == alignment_loss_flags['alignment_type'], align_with=alignment_loss_flags['align_with'])):
@@ -183,7 +191,7 @@ def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='
                                                'cossim' == alignment_loss_flags['alignment_type'],
                                                align_with=alignment_loss_flags['align_with'], use_slow_version=alignment_loss_flags.get('use_slow_version',False))):
                         loss.backward()
-                if ('2' not in alignment_loss_flags['align_with'] or steps > 1) and (not has_val_steps or steps % 2 == 0):
+                if ('2' not in alignment_loss_flags['align_with'] or steps > 1) and (not has_val_steps or ((steps-1)//communicate_grad_every % 2 == 1)):
                     ga = get_sum_along_batch(model, 'grad_alignments') # TODO save time by only computing alignment in val steps
                 else:
                     ga = None
@@ -231,7 +239,7 @@ def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='
                 ga = None
             if 'next_step_loss' in C.get():
                 if not has_val_steps or steps % 2 == 0:
-                    ga = torch.ones(len(data)) * loss.detach()
+                    ga = torch.ones(len(data)).to(loss.device) * loss.detach()
             #print('mem usage after backward', torch.cuda.memory_allocated() / 1000 // 1000, "MB")
 
             if finite_difference_loss and steps % 2 == 0: # eval step
@@ -248,9 +256,10 @@ def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='
                     modulator = model.adaptive_dropouters[0]
                     compute_preprocessor_gradients(model, modulator, old_parameters, loss_fn, modulator.last_multipler, modulator.last_multipler_detached,
                                                    old_detached_generated_data, old_label)
+                assert len(scheduler.base_lrs) == 1
                 call_attr_on_meta_modules('step', ga)
             if ga is not None:
-                call_attr_on_meta_modules('step',ga)
+                call_attr_on_meta_modules('step',ga, curr_lr_factor=scheduler.get_last_lr()[0]/scheduler.base_lrs[0])
             if C.get()['optimizer'].get('clip', 5) > 0:
                 nn.utils.clip_grad_norm_(model.parameters(), C.get()['optimizer'].get('clip', 5))
             if (steps-1) % C.get().get('step_optimizer_every', 1) == C.get().get('step_optimizer_nth_step', 0): # default is to step on the first step of each pack
@@ -258,7 +267,7 @@ def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='
                 if sec_optimizer is not None:
                     sec_optimizer.step()
             del ga
-        print(f"Time for forward/backward {time()-fb_time}")
+        #print(f"Time for forward/backward {time()-fb_time}")
 
         top1, top5 = accuracy(preds, label, (1, 5))
         metrics.add_dict({
@@ -306,7 +315,7 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
         logger.warning('tag not provided or rank > 0 -> no tensorboard log.')
     else:
         from tensorboardX import SummaryWriter
-    writers = [SummaryWriter(log_dir='./logs4/%s/%s' % (tag, x)) for x in ['train', 'valid', 'test', 'testtrain']]
+    writers = [SummaryWriter(log_dir='./logs5/%s/%s' % (tag, x)) for x in ['train', 'valid', 'test', 'testtrain']]
 
     def get_meta_optimizer_factory():
         meta_flags = C.get().get('meta_opt',{})
@@ -318,6 +327,12 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
             elif mo_flags['type'] == 'sgd':
                 def get_meta_optimizer(es_optimized_variables):
                     return torch.optim.SGD(es_optimized_variables, lr=mo_flags['lr'], momentum=mo_flags['beta1'])
+            elif mo_flags['type'] == 'radam':
+                def get_meta_optimizer(es_optimized_variables):
+                    return RAdam(es_optimized_variables, lr=mo_flags['lr'], betas=(mo_flags['beta1'], mo_flags['beta2'])) # could add eps
+            elif mo_flags['type'] == 'adabelief':
+                def get_meta_optimizer(es_optimized_variables):
+                    return AdaBelief(es_optimized_variables, lr=mo_flags['lr'], betas=(mo_flags['beta1'], mo_flags['beta2'])) # could add eps,rectify
             elif mo_flags['type'] == 'same_as_main':
                 def get_meta_optimizer(es_optimized_variables):
                     return optim.SGD(
@@ -335,7 +350,7 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
     google_augmentations.set_search_space(C.get().get('augmentation_search_space','standard'),C.get().get('augmentation_parameter_max', 30))
     max_epoch = C.get()['epoch']
     val_bs = C.get().get('val_batch',0)
-    trainsampler, trainloader, validloader, testloader_, testtrainloader_, dataset_info = get_dataloaders(C.get()['dataset'], C.get()['batch']+val_bs, dataroot, test_ratio, split_idx=cv_fold, get_meta_optimizer_factory=get_meta_optimizer_factory, distributed=worldsize>1, summary_writer=writers[0])
+    trainsampler, trainloader, validloader, testloader_, testtrainloader_, dataset_info = get_dataloaders(C.get()['dataset'], C.get()['batch']+val_bs, dataroot, test_ratio, split_idx=cv_fold, get_meta_optimizer_factory=get_meta_optimizer_factory, distributed=worldsize>1, started_with_spawn=C.get()['started_with_spawn'], summary_writer=writers[0])
 
     # create a model & an optimizer
     model = get_model(C.get()['model'], C.get()['batch'], val_bs, get_meta_optimizer_factory, num_class(C.get()['dataset']), writer=writers[0])
@@ -401,6 +416,9 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
                                     'learned_random_randaugmentspace_ensemble': LearnedPreprocessorEnsemble}
 
             if preprocessor_type in preprocessor_classes:
+                if 'learned_random_randaugmentspace_ensemble' == preprocessor_type and 'num_preprocessors' in preprocessor_flags:
+                    extra_kwargs['num_preprocessors'] = preprocessor_flags['num_preprocessors']
+
                 image_preprocessor = preprocessor_classes[preprocessor_type](dataset_info,
                                                                               preprocessor_flags['hidden_dim'],
                                                                               get_meta_optimizer_factory(),
@@ -418,6 +436,7 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
                                                                               label_smoothing_rate=preprocessor_flags.get('label_smoothing_rate',0.),
                                                                               device=torch.device(rank if worldsize > 1 else 'cuda:0'), sigmax_dist=preprocessor_flags['sigmax_dist'], exploresoftmax_dist=preprocessor_flags['exploresoftmax_dist'],
                                                                               use_images_for_sampler=preprocessor_flags['use_images_for_sampler'],
+                                                                              use_labels_for_sampler=preprocessor_flags.get('use_labels_for_sampler',False),
                                                                               summary_writer=writers[0],
                                                                               uniaug_val=preprocessor_flags['uniaug_val'],
                                                                               old_preprocessor_val=preprocessor_flags['oldpreprocessor_val'],
@@ -430,13 +449,16 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
                                                                               delete_every_x_steps=preprocessor_flags.get('delete_every_x_steps',False),
                                                                               use_rnn_sampler=preprocessor_flags.get('use_rnn_sampler',False),
                                                                               use_simple_sampler=preprocessor_flags.get('use_simple_sampler',False),
+                                                                              update_every_k_steps=preprocessor_flags.get('update_every_k_steps',1),
+                                                                              le_softmax_dist=preprocessor_flags.get('le_softmax',False),
                                                                               **extra_kwargs)
             else:
                 image_preprocessor = DifferentiableLearnedPreprocessor(dataset_info,hidden_dimension=preprocessor_flags['hidden_dim'],
                                                                        optimizer_creator=get_meta_optimizer_factory(),
                                                                        cutout=C.get().get('cutout', 0),
                                                                        uniaug_val=preprocessor_flags['uniaug_val'],
-                                                                       old_preprocessor_val=preprocessor_flags['oldpreprocessor_val'])
+                                                                       old_preprocessor_val=preprocessor_flags['oldpreprocessor_val'],
+                                                                       summary_writer=writers[0])
 
         elif preprocessor_type == 'standard':
             image_preprocessor = get_standard_preprocessor(dataset_info, C.get().get('cutout', 0), device=torch.device(rank if worldsize > 1 else 'cuda:0'))
@@ -561,14 +583,13 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
 
     del model
 
-    result['top1_test'] = best_top1
     return result
 
 def setup(global_rank, local_rank, world_size, port_suffix):
     torch.cuda.set_device(local_rank)
     if port_suffix is not None:
         os.environ['MASTER_ADDR'] = 'localhost'
-        os.environ['MASTER_PORT'] = f'123{port_suffix}'
+        os.environ['MASTER_PORT'] = f'12{port_suffix}'
 
         # initialize the process group
         dist.init_process_group("nccl", rank=global_rank, world_size=world_size)
@@ -593,13 +614,18 @@ def parse_args():
     return parser.parse_args()
 
 
-def spawn_process(global_rank, worldsize, port_suffix, local_rank=None):
+def spawn_process(global_rank, worldsize, port_suffix, args, config_path=None, communicate_results_with_queue=None, local_rank=None,):
     if local_rank is None:
         local_rank = global_rank
+    started_with_spawn = worldsize is not None and worldsize > 0
     if worldsize != 0:
         global_rank, worldsize = setup(global_rank, local_rank, worldsize, port_suffix)
-    args = parse_args()
     print('dist info', local_rank,global_rank,worldsize)
+    #communicate_results_with_queue.value = 1.
+    #return
+    if config_path is not None:
+        C(config_path)
+    C.get()['started_with_spawn'] = started_with_spawn
 
     if worldsize:
         assert worldsize == C.get()['gpus'], f"Did not specify the number of GPUs in Config with which it was started: {worldsize} vs {C.get()['gpus']}"
@@ -618,13 +644,22 @@ def spawn_process(global_rank, worldsize, port_suffix, local_rank=None):
         #add_filehandler(logger, args.save.replace('.pth', '.log'))
 
     #logger.info(json.dumps(C.get().conf, indent=4))
+    if 'seed' in C.get():
+        seed = C.get()['seed']
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed(seed)
+        random.seed(seed)
+        np.random.seed(seed)
+        #torch.backends.cudnn.benchmark = False
+
 
     import time
     t = time.time()
-    result = train_and_eval(local_rank, worldsize, args.tag, args.dataroot, test_ratio=args.cv_ratio, cv_fold=args.cv, save_path=args.save, only_eval=args.only_eval, metric='test')
+    result = train_and_eval(local_rank, worldsize, args.tag, args.dataroot, test_ratio=args.cv_ratio, cv_fold=args.cv, save_path=args.save, only_eval=args.only_eval, metric='last')
     elapsed = time.time() - t
+    print('done')
 
-    logger.info('done.')
+    logger.info(f'done on rank {global_rank}.')
     logger.info('model: %s' % C.get()['model'])
     logger.info('augmentation: %s' % C.get()['aug'])
     logger.info('\n' + json.dumps(result, indent=4))
@@ -633,6 +668,38 @@ def spawn_process(global_rank, worldsize, port_suffix, local_rank=None):
     logger.info(args.save)
     if worldsize:
         cleanup()
+
+    if global_rank == 0 and communicate_results_with_queue is not None:
+        #communicate_results_with_queue.put([result])
+        communicate_results_with_queue.value = result['top1_test']
+
+
+@dataclass
+class Args:
+    tag: str = ''
+    dataroot: str = None
+    save: str = ''
+    cv_ratio: float = 0.
+    cv: int = 0
+    only_eval: bool = False
+    local_rank: None = None
+
+def run_from_py(dataroot, config_dict):
+    args = Args(dataroot=dataroot)
+    with tempfile.NamedTemporaryFile(mode='w+') as f, tempfile.NamedTemporaryFile() as result_file:
+        path = f.name
+        yaml.dump(config_dict, f)
+        world_size = torch.cuda.device_count()
+        port_suffix = str(random.randint(100, 999))
+        #result_queue = mp.get_context('spawn').Queue()
+        result_queue = mp.get_context('spawn').Value('d',.0)
+        outcome = mp.spawn(spawn_process,
+                           args=(world_size, port_suffix, args, path, result_queue),
+                           nprocs=world_size,
+                           join=True)
+        #result = result_queue.get()[0]
+        result = result_queue.value
+    return result
 
 
 if __name__ == '__main__':
@@ -644,11 +711,13 @@ if __name__ == '__main__':
         world_size = torch.cuda.device_count()
         port_suffix = str(random.randint(10,99))
         if world_size > 1:
-            result = mp.spawn(spawn_process,
-                              args=(world_size,port_suffix),
+            outcome = mp.spawn(spawn_process,
+                              args=(world_size,port_suffix,parse_args()),
                               nprocs=world_size,
                               join=True)
         else:
-            spawn_process(0, 0, None)
+            spawn_process(0, 0, None, parse_args())
+        with open(f'/tmp/samshpopt/training_with_portsuffix_{port_suffix}.pkl', 'r') as f:
+            result = pickle.load(f)
     else:
-        spawn_process(None, -1, None, local_rank=args.local_rank)
+        spawn_process(None, -1, None, parse_args(), local_rank=args.local_rank)
