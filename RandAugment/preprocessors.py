@@ -365,7 +365,7 @@ class LearnedRandAugmentPreprocessor(ImagePreprocessor):
         self.model = model_for_online_tests
 
         dists = (torch.softmax, torch.log_softmax)
-        assert sum([sigmax_dist, exploresoftmax_dist, le_softmax_dist]) == 1
+        assert sum([sigmax_dist, exploresoftmax_dist, le_softmax_dist]) <= 1
         if sigmax_dist:
             dists = (sigmax, log_sigmax)
         if exploresoftmax_dist:
@@ -596,11 +596,11 @@ class LearnedPreprocessorEnsemble(ImagePreprocessor):
             offset = end
         return torch.cat(out_imgs, dim=0)
 
-    def step(self, rewards):
+    def step(self, rewards, curr_lr_factor=None):
         offset = 0
         for prepr in self.preprocessors:
             end = offset + self.bs // len(self.preprocessors)
-            prepr.step(rewards[offset:end])
+            prepr.step(rewards[offset:end], curr_lr_factor)
             offset = end
         assert end == len(rewards)
 

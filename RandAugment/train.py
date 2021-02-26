@@ -259,7 +259,7 @@ def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='
                 assert len(scheduler.base_lrs) == 1
                 call_attr_on_meta_modules('step', ga)
             if ga is not None:
-                call_attr_on_meta_modules('step',ga, curr_lr_factor=scheduler.get_last_lr()[0]/scheduler.base_lrs[0])
+                call_attr_on_meta_modules('step',ga, curr_lr_factor=scheduler.get_last_lr()[0]/C.get()['lr'])
             if C.get()['optimizer'].get('clip', 5) > 0:
                 nn.utils.clip_grad_norm_(model.parameters(), C.get()['optimizer'].get('clip', 5))
             if (steps-1) % C.get().get('step_optimizer_every', 1) == C.get().get('step_optimizer_nth_step', 0): # default is to step on the first step of each pack
@@ -315,7 +315,7 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
         logger.warning('tag not provided or rank > 0 -> no tensorboard log.')
     else:
         from tensorboardX import SummaryWriter
-    writers = [SummaryWriter(log_dir='./logs5/%s/%s' % (tag, x)) for x in ['train', 'valid', 'test', 'testtrain']]
+    writers = [SummaryWriter(log_dir='./logs7/%s/%s' % (tag, x)) for x in ['train', 'valid', 'test', 'testtrain']]
 
     def get_meta_optimizer_factory():
         meta_flags = C.get().get('meta_opt',{})
@@ -347,7 +347,7 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
         else:
             raise ValueError()
         return get_meta_optimizer
-    google_augmentations.set_search_space(C.get().get('augmentation_search_space','standard'),C.get().get('augmentation_parameter_max', 30))
+    google_augmentations.set_search_space(C.get().get('augmentation_search_space','standard'),C.get().get('augmentation_parameter_max', 30), C.get().get('custom_search_space_augs',None))
     max_epoch = C.get()['epoch']
     val_bs = C.get().get('val_batch',0)
     trainsampler, trainloader, validloader, testloader_, testtrainloader_, dataset_info = get_dataloaders(C.get()['dataset'], C.get()['batch']+val_bs, dataroot, test_ratio, split_idx=cv_fold, get_meta_optimizer_factory=get_meta_optimizer_factory, distributed=worldsize>1, started_with_spawn=C.get()['started_with_spawn'], summary_writer=writers[0])
@@ -355,7 +355,7 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
     # create a model & an optimizer
     model = get_model(C.get()['model'], C.get()['batch'], val_bs, get_meta_optimizer_factory, num_class(C.get()['dataset']), writer=writers[0])
     if worldsize > 1:
-        model = DDP(model.to(rank), device_ids=[rank])
+        model = DDP(model.to(rank), device_ids=[rank], find_unused_parameters=('shake' in C.get()['model']))
     else:
         model = model.to('cuda:0')
 
@@ -473,18 +473,19 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
     epoch_start = 1
     if save_path and os.path.exists(save_path):
         logger.info('%s file found. loading...' % save_path)
-        data = torch.load(save_path)
+        data = torch.load(save_path, map_location='cpu')
         if 'model' in data or 'state_dict' in data:
             key = 'model' if 'model' in data else 'state_dict'
             logger.info('checkpoint epoch@%d' % data['epoch'])
             if C.get().get('load_main_model', False):
-                if not isinstance(model, DataParallel):
-                    model.load_state_dict({k.replace('module.', ''): v for k, v in data[key].items()})
-                else:
-                    model.load_state_dict({k if 'module.' in k else 'module.'+k: v for k, v in data[key].items()})
+                model.load_state_dict(data[key])
+                #if not isinstance(model, DataParallel):
+                    #model.load_state_dict({k.replace('module.', ''): v for k, v in data[key].items()})
+                #else:
+                    #model.load_state_dict({k if 'module.' in k else 'module.'+k: v for k, v in data[key].items()})
                 optimizer.load_state_dict(data['optimizer'])
                 if data['epoch'] < C.get()['epoch']:
-                    epoch_start = data['epoch']
+                    epoch_start = data['epoch'] + 1
                 else:
                     only_eval = True
             if C.get().get('load_side_model', False):
@@ -558,7 +559,7 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
                 )
 
                 # save checkpoint
-                if save_path and C.get().get('save_model', True):
+                if save_path and C.get().get('save_model', True) and (worldsize <= 1 or torch.distributed.get_rank() == 0):
                     logger.info('save model@%d to %s' % (epoch, save_path))
                     torch.save({
                         'epoch': epoch,
@@ -580,6 +581,10 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
                         'preprocessor': None if image_preprocessor is None else image_preprocessor.state_dict(),
                         'model': model.state_dict()
                     }, save_path.replace('.pth', '_e%d_top1_%.3f_%.3f' % (epoch, rs['train']['top1'], rs['test']['top1']) + '.pth'))
+
+        early_finish_epoch = C.get().get('early_finish_epoch', None)
+        if early_finish_epoch == epoch:
+            break
 
     del model
 
@@ -684,8 +689,8 @@ class Args:
     only_eval: bool = False
     local_rank: None = None
 
-def run_from_py(dataroot, config_dict):
-    args = Args(dataroot=dataroot)
+def run_from_py(dataroot, config_dict, save=''):
+    args = Args(dataroot=dataroot, save=save)
     with tempfile.NamedTemporaryFile(mode='w+') as f, tempfile.NamedTemporaryFile() as result_file:
         path = f.name
         yaml.dump(config_dict, f)
@@ -693,10 +698,13 @@ def run_from_py(dataroot, config_dict):
         port_suffix = str(random.randint(100, 999))
         #result_queue = mp.get_context('spawn').Queue()
         result_queue = mp.get_context('spawn').Value('d',.0)
-        outcome = mp.spawn(spawn_process,
-                           args=(world_size, port_suffix, args, path, result_queue),
-                           nprocs=world_size,
-                           join=True)
+        if world_size > 1:
+            outcome = mp.spawn(spawn_process,
+                               args=(world_size, port_suffix, args, path, result_queue),
+                               nprocs=world_size,
+                               join=True)
+        else:
+            outcome = spawn_process(0, 0, port_suffix, args, path, result_queue)
         #result = result_queue.get()[0]
         result = result_queue.value
     return result

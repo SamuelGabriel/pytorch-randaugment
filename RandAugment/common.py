@@ -10,7 +10,7 @@ import torch
 from backpack import memory_cleanup
 from torch.utils.checkpoint import check_backward_validity, detach_variable, get_device_states, set_device_states
 from torchvision.datasets import VisionDataset, CIFAR10, CIFAR100, ImageFolder
-from torch.utils.data import Subset
+from torch.utils.data import Subset, ConcatDataset
 
 from PIL import Image
 
@@ -45,13 +45,15 @@ def get_sum_along_batch(model, attribute):
             grad_list.append(ga)
     return torch.stack(grad_list).sum(0)
 
-def get_gradients(model, copy=False):
+def get_gradients(model, copy=False, as_vector=False):
     grad_list = []
     for param in model.parameters():
         g = param.grad
-        if copy:
+        if copy and g is not None:
             g = g.clone()
         grad_list.append(g)
+    if as_vector:
+        return torch.cat([g.flatten() for g in grad_list if g is not None])
     return grad_list
 
 def recursive_backpack_memory_cleanup(module: torch.nn.Module):
@@ -258,12 +260,20 @@ class RepeatDataLoader:
         return (tuple(repeat(t) for t in b) for b in self.loader)
 
 def copy_and_replace_transform(ds: Union[CIFAR10, ImageFolder, Subset], transform):
-    assert ds.dataset.transform is not None if isinstance(ds,Subset) else ds.transform is not None # make sure still uses old style transform
+    assert ds.dataset.transform is not None if isinstance(ds,Subset) else (all(d.transform is not None for d in ds.datasets) if isinstance(ds,ConcatDataset) else ds.transform is not None) # make sure still uses old style transform
     if isinstance(ds, Subset):
         new_super_ds = copy(ds.dataset)
         new_super_ds.transform = transform
         new_ds = copy(ds)
         new_ds.dataset = new_super_ds
+    elif isinstance(ds, ConcatDataset):
+        def copy_and_replace_transform(ds):
+            new_ds = copy(ds)
+            new_ds.transform = transform
+            return new_ds
+
+        new_ds = ConcatDataset([copy_and_replace_transform(d) for d in ds.datasets])
+
     else:
         new_ds = copy(ds)
         new_ds.transform = transform
@@ -326,3 +336,42 @@ def doubly_stratified_split(labels, train_share, val_share):
     _, val_split = stratified_split(rest_labels, val_share/rest_share)
     val_split = [rest_split[idx] for idx in val_split]
     return train_split, val_split
+
+
+def to_gradient_copy(model_w_grads):
+    return Gradients(get_gradients(model_w_grads, copy=True))
+
+
+class Gradients():
+    def __init__(self, grad_list):
+        self.grads = grad_list
+
+    @staticmethod
+    def check_None_pattern_equal(grad_list1, grad_list2):
+        assert all((g1 is None) == (g2 is None) for g1, g2 in zip(grad_list1, grad_list2))
+
+    @torch.no_grad()
+    def __add__(self, other):
+        self.check_None_pattern_equal(self.grads, other.grads)
+        if isinstance(other, Gradients):
+            return Gradients([None if g is None else g + g_ for g, g_ in zip(self.grads, other.grads)])
+        else:
+            return Gradients([None if g is None else g + g_ for g, g_ in zip(self.grads, get_gradients(other))])
+
+    @torch.no_grad()
+    def __mul__(self, other):
+        assert isinstance(other, (int, float))
+        return Gradients([None if g is None else g * other for g in self.grads])
+
+    def __rmul__(self, other):
+        return self.__mul__(other)
+
+    @torch.no_grad()
+    def add_back(self, model):
+        model_gradients = get_gradients(model)
+        self.check_None_pattern_equal(self.grads, model_gradients)
+        for model_g, this_g in zip(model_gradients, self.grads):
+            if model_g is not None:
+                model_g.add_(this_g)
+
+

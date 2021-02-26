@@ -125,6 +125,7 @@ class MyWorker(Worker):
         {'model': {'type': 'wresnet28_10'},
          'dataset': 'cifar100',
          'aug': 'default',
+         'augmentation_search_space': 'long_wide',
          'cutout': 16,
          'batch': 64,
          'gpus': 4,
@@ -172,12 +173,15 @@ class MyWorker(Worker):
             else:
                 raise ValueError()
         else:
+            config['next_step_loss'] = True
+            config['preprocessor']['normalize_reward'] = False
+            """
             config['alignment_loss'] = {'summation': 'standard',
                                         'align_with': '2',
                                         'val_share': 0.0,
                                         'alignment_type': 'dot',
-                                        'has_val_steps': True}
-
+                                            'has_val_steps': True}
+            """
         print(config)
         return config
 
@@ -224,7 +228,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Example 1 - sequential and local execution.')
     parser.add_argument('--min_budget',   type=float, help='Minimum budget used during the optimization.',    default=66)
     parser.add_argument('--max_budget',   type=float, help='Maximum budget used during the optimization.',    default=200)
-    parser.add_argument('--n_iterations', type=int,   help='Number of iterations performed by the optimizer', default=20)
+    parser.add_argument('--n_iterations', type=int,   help='Number of iterations performed by the optimizer', default=30)
     parser.add_argument('--n_workers', type=int,   help='Number of workers to run in parallel.', default=2)
     parser.add_argument('--worker', help='Flag to turn this into a worker process', action='store_true')
     parser.add_argument('--run_id', type=str, help='A unique run id for this optimization run. An easy option is to use the job id of the clusters scheduler.')

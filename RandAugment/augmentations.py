@@ -5,7 +5,7 @@ import PIL, PIL.ImageOps, PIL.ImageEnhance, PIL.ImageDraw
 import numpy as np
 import torch
 
-from RandAugment import google_augmentations
+from RandAugment import google_augmentations, google_augmentations_closer_version
 
 
 def CutoutAbs(img, v):  # [0, 60] => percentage: [0, 0.2]
@@ -84,16 +84,24 @@ class CutoutDefault(object):
         return img
 
 
-def get_randaugment(n,m,bs):
+def get_randaugment(n,m,weights,bs):
+    if m < 0 and n < 0:
+        return google_augmentations_closer_version.RandAugment(-n,-m)
     if m == 0:
-        if n == 0:
+        if weights is not None:
+            return google_augmentations.UniAugmentWeighted(n, probs=weights)
+        elif n == 0:
             return google_augmentations.UniAugment()
+        elif n == 1:
+            return google_augmentations.UniAugmentWithSingleAug()
         elif n == 2:
             return google_augmentations.AlwaysTwoUniAug()
         elif n == 4:
             return google_augmentations.OnetoFourUniAug()
         elif n == 8:
             return google_augmentations.OnetoFourEverySecondUniAug(bs)
+        elif n == 16:
+            return google_augmentations.UniAugmentWithoutReplacement()
         else:
             raise ValueError('Wrong RandAug Params.')
     else:

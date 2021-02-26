@@ -23,21 +23,25 @@ def get_last_metric(path, metric):
             print(e)
     return v, last_point
 
-def get_results(logdir, mypath, split='test', metric='top1'):
+def get_results(logdir, mypath, split='test', metric='top1', assert_step=None):
     mypath = mypath.split('/')[-1]
     suffix = '.yaml'
     if mypath.endswith(suffix):
         mypath = mypath[:-len(suffix)]
     paths = [path for path in listdir(logdir) if re.search(f'{mypath}(_.try|).yaml', path)]
-    print([path[len(mypath):] for path in paths])
+    if assert_step is None:
+        print([path[len(mypath):] for path in paths])
 
     paths = [join(join(logdir, path), split) for path in paths]
     results = [get_last_metric(path, metric) for path in paths]
     assert all([r[1] == results[0][1] for r in results]), results
     step = results[0][1]
     results = [r[0] for r in results]
-    assert all(results), results
-    print(f"The results are the following {len(results)} at step {step}: {results}")
+    assert all(r is not None for r in results), results
+    if assert_step is not None:
+        assert assert_step == step, f'{assert_step} vs {step}'
+    else:
+        print(f"The results are the following {len(results)} at step {step}: {results}")
 
     results = np.array(results)
 
@@ -47,7 +51,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Get Top1 Results.')
     parser.add_argument('path',
                    help='Prefix of the paths/conf files for the runs to evaluate.')
-    parser.add_argument('--logdir', default='logs5')
+    parser.add_argument('--logdir', default='logs7')
     parser.add_argument('--split', default='test')
     parser.add_argument('--metric', default='top1', help='Can be e.g. top1, top5, loss, eval_top1')
     args = parser.parse_args()

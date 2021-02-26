@@ -17,6 +17,7 @@ from RandAugment.common import apply_weightnorm
 from RandAugment.meta_state_adaption import AdaptiveDropouter, Modulator
 
 
+# example usage get_model(
 def get_model(conf, bs, val_bs, optimizer_creator_factory, num_class=10, writer=None):
     name = conf['type']
     assert not ('adaptive_dropouter' in conf and 'adaptive_modulator' in conf)
@@ -101,6 +102,7 @@ def num_class(dataset):
         'fiftyexample_cifar100': 100,
         'tenclass_cifar100': 10,
         'svhn': 10,
+        'svhncore': 10,
         'reduced_svhn': 10,
         'imagenet': 1000,
         'reduced_imagenet': 120,

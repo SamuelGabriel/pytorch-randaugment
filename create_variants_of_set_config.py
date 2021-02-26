@@ -78,13 +78,13 @@ if __name__ == '__main__':
                 mother_dict = access_with_path(config_copy, set_path[:-1])
                 mother_dict.pop(set_path[-1])
                 mother_dict[set_path[-1][:-len('_set')]] = option
-                new_config_set.append((config_copy,name_prefix+'_'+'.'.join(set_path)[:-len('_set')]+'='+str(option)))
+                new_config_set.append((config_copy,name_prefix+'__'+'.'.join(set_path)[:-len('_set')]+'='+str(option)))
         config_set = new_config_set
 
 
     for config, path_prefix in config_set:
         for rerun_idx in range(1, args.number_of_reruns + 1):
-            filename = path_prefix+f'_{rerun_idx}try.yaml'
+            filename = path_prefix+f'__{rerun_idx}try.yaml'
             print(filename)
             with open(filename, 'w') as config_file:
                 yaml.dump(config,config_file)

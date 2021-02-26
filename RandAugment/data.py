@@ -39,7 +39,7 @@ _CIFAR_MEAN, _CIFAR_STD = (0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010) # t
 def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_optimizer_factory=None, distributed=False, started_with_spawn=False, summary_writer=None):
     print(f'started with spawn {started_with_spawn}')
     dataset_info = {}
-    if 'cifar' in dataset or 'svhn' in dataset:
+    if 'cifar' in dataset:
         transform_train = transforms.Compose([
             transforms.RandomCrop(32, padding=4),
             transforms.RandomHorizontalFlip(),
@@ -54,9 +54,24 @@ def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_
         dataset_info['std'] = _CIFAR_STD
         dataset_info['img_dims'] = (3,32,32)
         dataset_info['num_labels'] = 100 if '100' in dataset and 'ten' not in dataset else 10
+    elif 'svhn' in dataset:
+        svhn_mean = [0.4379, 0.4440, 0.4729]
+        svhn_std = [0.1980, 0.2010, 0.1970]
+        transform_train = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(svhn_mean, svhn_std),
+        ])
+        transform_test = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(svhn_mean, svhn_std),
+        ])
+        dataset_info['mean'] = svhn_mean
+        dataset_info['std'] = svhn_std
+        dataset_info['img_dims'] = (3, 32, 32)
+        dataset_info['num_labels'] = 10
     elif 'imagenet' in dataset:
         transform_train = transforms.Compose([
-            transforms.RandomResizedCrop(224, scale=(0.08, 1.0), interpolation=Image.BICUBIC),
+            transforms.RandomResizedCrop((224,244), scale=(0.08, 1.0), interpolation=Image.BICUBIC),
             transforms.RandomHorizontalFlip(),
             transforms.ColorJitter(
                 brightness=0.4,
@@ -70,7 +85,7 @@ def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_
 
         transform_test = transforms.Compose([
             transforms.Resize(256, interpolation=Image.BICUBIC),
-            transforms.CenterCrop(224),
+            transforms.CenterCrop((224,244)),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
@@ -84,7 +99,8 @@ def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_
     logger.debug('augmentation: %s' % C.get()['aug'])
     if C.get()['aug'] == 'randaugment':
         assert not C.get()['randaug'].get('corrected_sample_space') and not C.get()['randaug'].get('google_augmentations')
-        transform_train.transforms.insert(0, get_randaugment(C.get()['randaug']['N'], C.get()['randaug']['M'], C.get()['batch']))
+        transform_train.transforms.insert(0, get_randaugment(n=C.get()['randaug']['N'], m=C.get()['randaug']['M'],
+                                                             weights=C.get()['randaug'].get('weights',None), bs=C.get()['batch']))
     elif C.get()['aug'] in ['default', 'inception', 'inception320']:
         pass
     else:
@@ -127,6 +143,10 @@ def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_
         total_trainset, testset = get_tenclass_CIFAR100_trainandval(root=dataroot, download=True, transform=transform_train)
     elif dataset == 'fiftyexample_cifar100':
         total_trainset, testset = get_fiftyexample_CIFAR100_trainandval(root=dataroot, download=True, transform=transform_train)
+    elif dataset == 'svhncore':
+        total_trainset = torchvision.datasets.SVHN(root=dataroot, split='train', download=True,
+                                                   transform=transform_train)
+        testset = torchvision.datasets.SVHN(root=dataroot, split='test', download=True, transform=transform_test)
     elif dataset == 'svhn':
         trainset = torchvision.datasets.SVHN(root=dataroot, split='train', download=True, transform=transform_train)
         extraset = torchvision.datasets.SVHN(root=dataroot, split='extra', download=True, transform=transform_train)
@@ -146,7 +166,7 @@ def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_
     if 'throwaway_share_of_ds' in C.get():
         assert 'val_step_trainloader_val_share' not in C.get()
         share = C.get()['throwaway_share_of_ds']['throwaway_share']
-        train_subset_inds, rest_inds = stratified_split(total_trainset.targets,share)
+        train_subset_inds, rest_inds = stratified_split(total_trainset.targets if hasattr(total_trainset, 'targets') else list(total_trainset.labels),share)
         if C.get()['throwaway_share_of_ds']['use_throwaway_as_val']:
             testset = copy_and_replace_transform(Subset(total_trainset, rest_inds), transform_test)
         total_trainset = Subset(total_trainset, train_subset_inds)

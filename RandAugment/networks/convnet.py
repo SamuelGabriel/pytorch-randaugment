@@ -2,7 +2,7 @@ import torch
 from torch import nn
 
 class SeqConvNet(nn.Module):
-    def __init__(self,D_out,fixed_dropout=None,in_channels=3,channels=(6,16),h_dims=(120,84),adaptive_dropout_creator=None,batch_norm=False):
+    def __init__(self,D_out,fixed_dropout=None,in_channels=3,channels=(64,64),h_dims=(200,100),adaptive_dropout_creator=None,batch_norm=False):
         super().__init__()
         print("Using SeqConvNet")
         assert len(channels) == 2 == len(h_dims)

@@ -30,12 +30,12 @@ class Augmenter(nn.Module):
         pass
 
 def denormalize(img, mean, std):
-    mean, std = torch.tensor(mean), torch.tensor(std)
+    mean, std = torch.tensor(mean).to(img.device), torch.tensor(std).to(img.device)
     return img.mul_(std[:,None,None]).add_(mean[:,None,None])
 
-def normalize(imgs, mean, std):
-    mean, std = torch.tensor(mean), torch.tensor(std)
-    return imgs.sub_(mean[:,None,None]).div_(std[:,None,None])
+def normalize(img, mean, std):
+    mean, std = torch.tensor(mean).to(img.device), torch.tensor(std).to(img.device)
+    return img.sub_(mean[:,None,None]).div_(std[:,None,None])
 
 class RestrictedAugmenter(nn.Module):
     def __init__(self, dataset_info):

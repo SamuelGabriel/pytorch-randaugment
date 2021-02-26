@@ -78,6 +78,9 @@ class TransformT(object):
     self.name = name
     self.xform = xform_fn
 
+  def __repr__(self):
+    return '<' + self.name + '>'
+
   def pil_transformer(self, probability, level):
 
     def return_function(im):
@@ -396,7 +399,7 @@ ALL_TRANSFORMS = [
 
 min_max_vals = MinMaxVals()
 
-def set_search_space(search_space, parameter_max):
+def set_search_space(search_space, parameter_max, custom_search_space_augs):
     global ALL_TRANSFORMS, min_max_vals, PARAMETER_MAX
     PARAMETER_MAX = parameter_max
     if 'wide' in search_space:
@@ -578,6 +581,45 @@ def set_search_space(search_space, parameter_max):
             opt_black,
             opt_labelnoise
         ]
+    elif 'custom' in search_space:
+        assert custom_search_space_augs is not None
+
+        custom_search_space_augs_mapping = {
+            'auto_contrast': auto_contrast,
+            'equalize': equalize,
+            'rotate': rotate,
+            'solarize': solarize,
+            'color': color,
+            'posterize': posterize,
+            'contrast': contrast,
+            'brightness': brightness,
+            'sharpness': sharpness,
+            'shear_x': shear_x,
+            'shear_y': shear_y,
+            'translate_x': translate_x,
+            'translate_y': translate_y,
+            # sample_pairing,
+            'blur': blur,
+            'invert': invert,
+            'flip_lr': flip_lr,
+            'flip_ud': flip_ud,
+            'cutout': cutout,
+            'crop_bilinear': crop_bilinear,
+            'contour': contour,
+            'detail': detail,
+            'edge_enhance': edge_enhance,
+            'sharpen': sharpen,
+            'max_': max_,
+            'min_': min_,
+            'median': median,
+            'gaussian': gaussian
+        }
+        ALL_TRANSFORMS = [
+            identity,
+        ] + [
+            custom_search_space_augs_mapping[aug] for aug in custom_search_space_augs
+        ]
+        print("CUSTOM Augs set to:", ALL_TRANSFORMS)
     else:
         print("Using standard aug ops.")
         if 'standard' not in search_space:
@@ -609,6 +651,25 @@ class UniAugment:
             img = op.pil_transformer(probability,level)(img)
         return img
 
+class UniAugmentWithoutReplacement:
+    def __call__(self, img):
+        ops = random.sample(ALL_TRANSFORMS, k=2)
+        for op in ops:
+            probability = random.random()
+            level = random.randint(0,PARAMETER_MAX)
+            img = op.pil_transformer(probability,level)(img)
+        return img
+
+
+class UniAugmentWithSingleAug:
+    def __call__(self, img):
+        ops = random.choices(ALL_TRANSFORMS, k=1)
+        for op in ops:
+            probability = random.random()
+            level = random.randint(0,PARAMETER_MAX)
+            img = op.pil_transformer(probability,level)(img)
+        return img
+
 
 class AlwaysTwoUniAug:
     def __call__(self, img):
@@ -627,6 +688,19 @@ class OnetoFourUniAug:
             probability = random.random()
             level = random.randint(0, PARAMETER_MAX)
             img = op.pil_transformer(probability, level)(img)
+        return img
+
+class UniAugmentWeighted:
+    def __init__(self, n, probs):
+        self.n = n
+        self.probs = probs # [prob of zero augs, prob of one aug, ..]
+
+    def __call__(self, img):
+        k = random.choices(range(len(self.probs)), self.probs)[0]
+        ops = random.choices(ALL_TRANSFORMS, k=k)
+        for op in ops:
+            level = random.randint(0, PARAMETER_MAX)
+            img = op.pil_transformer(1., level)(img)
         return img
 
 images_seen = 0

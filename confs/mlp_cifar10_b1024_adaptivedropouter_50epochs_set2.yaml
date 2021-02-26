@@ -6,7 +6,7 @@ model:
     simple_dropout: false
     out_bias: true
     target_p: .9
-    cross_entropy_alpha: .01
+    cross_entropy_alpha_set: [.01,.005,.0025]
     inference_dropout: false
     tanh: false
     batch_norm: false
@@ -23,7 +23,7 @@ cutout: 0
 batch: 1024
 gpus: 1
 epoch: 50
-lr_set: [0.025]
+lr_set: [0.01 ,0.025, 0.1, 0.4]
 lr_schedule:
   type: 'cosine'
   warmup:
@@ -44,7 +44,7 @@ alignment_loss:
 meta_opt:
   meta_optimizer:
     type: adam
-    lr_set: [.2]
+    lr_set: [.0, .1, .2, .4,]
     beta1: .9
     beta2: .999
 

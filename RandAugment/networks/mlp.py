@@ -12,7 +12,7 @@ def MLP(D_out,in_dims,adaptive_dropouter_creator):
         nn.Linear(in_dim, 300),
         nn.Tanh(),
         nn.Linear(300,100),
-        ada_dropper if adaptive_dropouter_creator is not None else nn.Identity(),
+        ada_dropper or nn.Identity(),
         nn.Tanh(),
         nn.Linear(100,D_out)
     )
