@@ -233,7 +233,6 @@ def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='
                 if communicate_grad:
                     loss.backward()
                 else:
-                    #torch.autograd.grad(loss, list(model.parameters()))
                     with model.no_sync():
                         loss.backward()
                 ga = None

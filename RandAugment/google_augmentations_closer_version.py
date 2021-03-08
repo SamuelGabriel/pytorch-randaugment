@@ -39,6 +39,28 @@ def pil_unwrap(img):
   """Converts the PIL img to a numpy array."""
   return img.convert('RGB')
 
+def apply_policy(policy, img, use_fixed_posterize=False):
+  """Apply the `policy` to the numpy `img`.
+
+  Args:
+    policy: A list of tuples with the form (name, probability, level) where
+      `name` is the name of the augmentation operation to apply, `probability`
+      is the probability of applying the operation and `level` is what strength
+      the operation to apply.
+    img: Numpy image that will have `policy` applied to it.
+
+  Returns:
+    The result of applying `policy` to `img`.
+  """
+  nametotransform = fixed_AA_NAME_TO_TRANSFORM if use_fixed_posterize else AA_NAME_TO_TRANSFORM
+  pil_img = pil_wrap(img)
+  for xform in policy:
+    assert len(xform) == 3
+    name, probability, level = xform
+    xform_fn = nametotransform[name].pil_transformer(probability, level)
+    pil_img = xform_fn(pil_img)
+  return pil_unwrap(pil_img)
+
 
 def random_flip(x):
   """Flip the input x horizontally with 50% probability."""
@@ -187,6 +209,13 @@ def _posterize_impl(pil_img, level):
 
 posterize = TransformT('Posterize', _posterize_impl)
 
+def _fixed_posterize_impl(pil_img, level):
+  """Applies PIL Posterize to `pil_img`."""
+  level = int_parameter(level, 4)
+  return ImageOps.posterize(pil_img.convert('RGB'), 8 - level).convert('RGBA')
+
+fixed_posterize = TransformT('Posterize', _fixed_posterize_impl)
+
 
 def _shear_x_impl(pil_img, level):
   """Applies PIL ShearX to `pil_img`.
@@ -325,6 +354,59 @@ brightness = TransformT('Brightness', _enhancer_impl(
     ImageEnhance.Brightness))
 sharpness = TransformT('Sharpness', _enhancer_impl(ImageEnhance.Sharpness))
 
+def create_cutout_mask(img_height, img_width, num_channels, size):
+  """Creates a zero mask used for cutout of shape `img_height` x `img_width`.
+
+  Args:
+    img_height: Height of image cutout mask will be applied to.
+    img_width: Width of image cutout mask will be applied to.
+    num_channels: Number of channels in the image.
+    size: Size of the zeros mask.
+
+  Returns:
+    A mask of shape `img_height` x `img_width` with all ones except for a
+    square of zeros of shape `size` x `size`. This mask is meant to be
+    elementwise multiplied with the original image. Additionally returns
+    the `upper_coord` and `lower_coord` which specify where the cutout mask
+    will be applied.
+  """
+  assert img_height == img_width
+
+  # Sample center where cutout mask will be applied
+  height_loc = np.random.randint(low=0, high=img_height)
+  width_loc = np.random.randint(low=0, high=img_width)
+
+  # Determine upper right and lower left corners of patch
+  upper_coord = (max(0, height_loc - size // 2), max(0, width_loc - size // 2))
+  lower_coord = (min(img_height, height_loc + size // 2),
+                 min(img_width, width_loc + size // 2))
+  mask_height = lower_coord[0] - upper_coord[0]
+  mask_width = lower_coord[1] - upper_coord[1]
+  assert mask_height > 0
+  assert mask_width > 0
+
+  mask = np.ones((img_height, img_width, num_channels))
+  zeros = np.zeros((mask_height, mask_width, num_channels))
+  mask[upper_coord[0]:lower_coord[0], upper_coord[1]:lower_coord[1], :] = (
+      zeros)
+  return mask, upper_coord, lower_coord
+
+def _cutout_pil_impl(pil_img, level):
+  """Apply cutout to pil_img at the specified level."""
+  size = int_parameter(level, 20)
+  if size <= 0:
+    return pil_img
+  img_height, img_width, num_channels = (32, 32, 3)
+  _, upper_coord, lower_coord = (
+      create_cutout_mask(img_height, img_width, num_channels, size))
+  pixels = pil_img.load()  # create the pixel map
+  for i in range(upper_coord[0], lower_coord[0]):  # for every col:
+    for j in range(upper_coord[1], lower_coord[1]):  # For every row
+      pixels[i, j] = (125, 122, 113, 0)  # set the colour accordingly
+  return pil_img
+
+cutout = TransformT('Cutout', _cutout_pil_impl)
+
 
 
 ALL_TRANSFORMS = [
@@ -344,6 +426,54 @@ ALL_TRANSFORMS = [
     translate_y,
 ]
 
+AA_ALL_TRANSFORMS = [
+    flip_lr,
+    flip_ud,
+    auto_contrast,
+    equalize,
+    invert,
+    rotate,
+    posterize,
+    crop_bilinear,
+    solarize,
+    color,
+    contrast,
+    brightness,
+    sharpness,
+    shear_x,
+    shear_y,
+    translate_x,
+    translate_y,
+    cutout,
+    blur,
+    smooth
+]
+
+
+fixed_AA_ALL_TRANSFORMS = [
+    flip_lr,
+    flip_ud,
+    auto_contrast,
+    equalize,
+    invert,
+    rotate,
+    fixed_posterize,
+    crop_bilinear,
+    solarize,
+    color,
+    contrast,
+    brightness,
+    sharpness,
+    shear_x,
+    shear_y,
+    translate_x,
+    translate_y,
+    cutout,
+    blur,
+    smooth
+]
+
+
 class RandAugment:
     def __init__(self, n, m):
         self.n = n
@@ -358,5 +488,7 @@ class RandAugment:
 
         return img
 
+AA_NAME_TO_TRANSFORM = {t.name: t for t in AA_ALL_TRANSFORMS}
+fixed_AA_NAME_TO_TRANSFORM = {t.name: t for t in fixed_AA_ALL_TRANSFORMS}
+
 NAME_TO_TRANSFORM = {t.name: t for t in ALL_TRANSFORMS}
-TRANSFORM_NAMES = NAME_TO_TRANSFORM.keys()

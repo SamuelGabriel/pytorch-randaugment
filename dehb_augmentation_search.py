@@ -57,117 +57,19 @@ def get_searchspace(full_search_space=True):
         cs.add_hyperparameter(bool_hp('gaussian'))
     return cs
 
-def get_fixed_search_space(cs):
-    fixed_search_space_config_dict = {'auto_contrast': True,
-                                      'blur': True,
-                                      'brightness': True,
-                                      'color': True,
-                                      'contour': False,
-                                      'contrast': True,
-                                      'crop_bilinear': False,
-                                      'cutout': False,
-                                      'detail': False,
-                                      'edge_enhance': False,
-                                      'equalize': True,
-                                      'flip_lr': False,
-                                      'flip_ud': False,
-                                      'gaussian': False,
-                                      'invert': False,
-                                      'max_': False,
-                                      'median': False,
-                                      'min_': False,
-                                      'posterize': True,
-                                      'rotate': True,
-                                      'sharpen': False,
-                                      'sharpness': True,
-                                      'shear_x': True,
-                                      'shear_y': True,
-                                      'solarize': True,
-                                      'translate_x': True,
-                                      'translate_y': True}
-    fixed_search_space_config_dict = {k: v for k,v in fixed_search_space_config_dict.items() if k in cs.get_hyperparameter_names() or v}
-    fixed_search_space_config = CS.Configuration(cs, values=fixed_search_space_config_dict)
-    return fixed_search_space_config
-
-def mutate(config,random_replacement_prob):
-    config_dict = config.get_dictionary()
-    new_config_dict = {}
-    is_there_a_difference = False
-    while not is_there_a_difference:
-        for config_name, value in config_dict.items():
-            random_bool = bool(random.randint(0,1))
-            new_value = random_bool if random.random() < random_replacement_prob else value
-            new_config_dict[config_name] = new_value
-            if value != new_value:
-                is_there_a_difference = True
-    return CS.Configuration(cs, values=new_config_dict)
-
 
 def run_conf(conf, args):
     epochs = args.epochs
     save_path = args.load_save_path
     return conf, train.run_from_py('data', csconfig_to_realconfig(conf.get_dictionary(), epochs=epochs), save_path)
 
-def wait_for_runs(population):
-    new_population = []
-    for member in population:
-        if isinstance(member,tuple):
-            new_population.append(member)
-        else:
-            new_population.append(member.result())
-    return new_population
-
-
-def initialize_evolution(executor, cs, fixed_search_space_config, args):
-    pop = []
-    #for i in range(args.pop_size - 1):
-    #    pop.append(executor.submit(run_conf, cs.sample_configuration(), args.epochs))
-    biased_portion = int(args.initial_biased_population_share * args.pop_size)
-    unbiased_portion = args.pop_size - biased_portion
-    configs = []
-    for i in range(unbiased_portion-1):
-        config = cs.sample_configuration()
-        configs.append(config)
-        pop.append(executor.submit(run_conf, config, args))
-    pop.append(executor.submit(run_conf, CS.Configuration(cs, vector=np.array([False]*len(fixed_search_space_config.get_dictionary()))), args))
-    if biased_portion:
-        for i in range(biased_portion - 1):
-            new_conf = mutate(fixed_search_space_config, args.random_replacement_prob)
-            pop.append(executor.submit(run_conf, new_conf, args))
-        pop.append(executor.submit(run_conf, fixed_search_space_config, args))
-    return pop
-
-
-def evolution_step(executor, cs, pop, died_pop, args):
-    assert len(pop) == args.pop_size
-    pop_size = len(pop)
-    added_pop = []
-    for contest_idx in range(args.number_of_parallel_runs):
-        contestants = random.sample(pop, args.number_of_contestants_per_contest)
-        best_contestant = acc_max(contestants)
-        new_conf = mutate(best_contestant[0], args.random_replacement_prob)
-        new_member = executor.submit(
-            run_conf, new_conf, args
-        )
-        added_pop.append(new_member)
-    pop.extend(wait_for_runs(added_pop))
-    died_pop.extend(pop[:-pop_size])
-    del pop[:-pop_size]
-    return pop, died_pop
-
-
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('base_config')
     parser.add_argument('--number_of_parallel_runs', type=int, default=10)
-    parser.add_argument('--number_of_contestants_per_contest', type=int, default=20)
-    parser.add_argument('--pop_size', type=int, default=100)
-    parser.add_argument('--random_replacement_prob', type=float, default=.05)
     parser.add_argument('--max_time_in_secs', type=int, default=48*60*60)
     parser.add_argument('--epochs', type=int, default=200)
-    parser.add_argument('--initial_biased_population_share', type=float, default=.5)
-    parser.add_argument('--load_pop_and_dead_pop', action='store_true')
     parser.add_argument('--reduced_search_space', action='store_true')
     parser.add_argument('--log_file', default=None)
     parser.add_argument('--load_save_path', default='')
@@ -191,7 +93,6 @@ if __name__ == '__main__':
                               slurm_setup=['export MKL_THREADING_LAYER=GNU'], slurm_exclude='dlcgpu02,dlcgpu18')
 
     cs = get_searchspace(full_search_space=not args.reduced_search_space)
-    fixed_search_space_config = get_fixed_search_space(cs)
 
     def target_function(conf, budget):
         assert budget == args.epochs

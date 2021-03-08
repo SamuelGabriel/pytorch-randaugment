@@ -28,7 +28,7 @@ def get_results(logdir, mypath, split='test', metric='top1', assert_step=None):
     suffix = '.yaml'
     if mypath.endswith(suffix):
         mypath = mypath[:-len(suffix)]
-    paths = [path for path in listdir(logdir) if re.search(f'{mypath}(_.try|).yaml', path)]
+    paths = [path for path in listdir(logdir) if re.search(f'{mypath}(_[0-9]+try|).yaml', path)]
     if assert_step is None:
         print([path[len(mypath):] for path in paths])
 
@@ -62,3 +62,4 @@ if __name__ == '__main__':
     confidence = .95
     h = se * st.t.ppf((1 + confidence) / 2., n-1)
     print(f"Mean: {round(np.mean(results),4)}, Std: {round(np.std(results),4)}, +/-: {round(h,4)}")
+    print(f"{round(np.mean(results)*100,2)} $\pm$ {str(round(h,4)*100)[1:]}")

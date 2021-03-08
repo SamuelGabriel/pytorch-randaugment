@@ -266,15 +266,18 @@ def _solarize_impl(pil_img, level):
 solarize = TransformT('Solarize', _solarize_impl)
 
 
-def _enhancer_impl(enhancer):
+def _enhancer_impl(enhancer, minimum=None, maximum=None):
   """Sets level to be between 0.1 and 1.8 for ImageEnhance transforms of PIL."""
   def impl(pil_img, level):
-    v = float_parameter(level, min_max_vals.enhancer.max-min_max_vals.enhancer.min) + min_max_vals.enhancer.min  # going to 0 just destroys it
+    mini = min_max_vals.enhancer.min if minimum is None else minimum
+    maxi = min_max_vals.enhancer.max if maximum is None else maximum
+    v = float_parameter(level, maxi-mini) + mini  # going to 0 just destroys it
     return enhancer(pil_img).enhance(v)
   return impl
 
 
 color = TransformT('Color', _enhancer_impl(ImageEnhance.Color))
+ohl_color = TransformT('Color', _enhancer_impl(ImageEnhance.Color, .3, .9))
 contrast = TransformT('Contrast', _enhancer_impl(ImageEnhance.Contrast))
 brightness = TransformT('Brightness', _enhancer_impl(
     ImageEnhance.Brightness))
@@ -420,6 +423,17 @@ def set_search_space(search_space, parameter_max, custom_search_space_augs):
     elif 'fix' in search_space:
         min_max_vals = MinMaxVals(
             posterize=MinMax(4,8)
+        )
+    elif 'ohl' in search_space:
+        assert PARAMETER_MAX == 2
+        min_max_vals = MinMaxVals(
+            shear=MinMax(.1, .3),
+            translate=MinMax(5, 14),
+            rotate=MinMax(10, 30),
+            solarize=MinMax(26, 179),
+            posterize=MinMax(4, 7),
+            enhancer=MinMax(1.3, 1.9),
+            cutout=MinMax(.0, .6),
         )
 
     if 'opt_long' in search_space:
@@ -581,10 +595,51 @@ def set_search_space(search_space, parameter_max, custom_search_space_augs):
             opt_black,
             opt_labelnoise
         ]
+    elif 'autoaug' in search_space:
+        ALL_TRANSFORMS = [
+            flip_lr,
+            flip_ud,
+            auto_contrast,
+            equalize,
+            invert,
+            rotate,
+            posterize,
+            crop_bilinear,
+            solarize,
+            color,
+            contrast,
+            brightness,
+            sharpness,
+            shear_x,
+            shear_y,
+            translate_x,
+            translate_y,
+            cutout,
+            blur,
+            smooth
+        ]
+    elif 'ohl' in search_space:
+        ALL_TRANSFORMS = [
+            shear_x, #ok
+            shear_y, #ok
+            translate_x, #ok
+            translate_y, #ok
+            rotate, #ok
+            ohl_color, #nok
+            posterize, #ok
+            solarize, #ok
+            contrast, #ok
+            sharpness, #ok
+            brightness, #ok
+            auto_contrast,
+            equalize,
+            invert
+        ]
     elif 'custom' in search_space:
         assert custom_search_space_augs is not None
 
         custom_search_space_augs_mapping = {
+            'identity': identity,
             'auto_contrast': auto_contrast,
             'equalize': equalize,
             'rotate': rotate,
@@ -614,9 +669,8 @@ def set_search_space(search_space, parameter_max, custom_search_space_augs):
             'median': median,
             'gaussian': gaussian
         }
-        ALL_TRANSFORMS = [
-            identity,
-        ] + [
+        ALL_TRANSFORMS = [] if 'woidentity' in search_space else [identity]
+        ALL_TRANSFORMS += [
             custom_search_space_augs_mapping[aug] for aug in custom_search_space_augs
         ]
         print("CUSTOM Augs set to:", ALL_TRANSFORMS)

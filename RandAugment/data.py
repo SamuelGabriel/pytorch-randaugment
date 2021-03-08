@@ -39,6 +39,7 @@ _CIFAR_MEAN, _CIFAR_STD = (0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010) # t
 def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_optimizer_factory=None, distributed=False, started_with_spawn=False, summary_writer=None):
     print(f'started with spawn {started_with_spawn}')
     dataset_info = {}
+    pre_transform_train = transforms.Compose([])
     if 'cifar' in dataset:
         transform_train = transforms.Compose([
             transforms.RandomCrop(32, padding=4),
@@ -53,6 +54,22 @@ def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_
         dataset_info['mean'] = _CIFAR_MEAN
         dataset_info['std'] = _CIFAR_STD
         dataset_info['img_dims'] = (3,32,32)
+        dataset_info['num_labels'] = 100 if '100' in dataset and 'ten' not in dataset else 10
+    elif 'pre_transform_cifar' in dataset:
+        pre_transform_train = transforms.Compose([
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),])
+        transform_train = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(_CIFAR_MEAN, _CIFAR_STD),
+        ])
+        transform_test = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(_CIFAR_MEAN, _CIFAR_STD),
+        ])
+        dataset_info['mean'] = _CIFAR_MEAN
+        dataset_info['std'] = _CIFAR_STD
+        dataset_info['img_dims'] = (3, 32, 32)
         dataset_info['num_labels'] = 100 if '100' in dataset and 'ten' not in dataset else 10
     elif 'svhn' in dataset:
         svhn_mean = [0.4379, 0.4440, 0.4729]
@@ -91,6 +108,50 @@ def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_
         ])
         dataset_info['mean'] = [0.485, 0.456, 0.406]
         dataset_info['std'] = [0.229, 0.224, 0.225]
+        dataset_info['img_dims'] = (3,224,244)
+        dataset_info['num_labels'] = 1000
+    elif 'smallwidth_imagenet' in dataset:
+        transform_train = transforms.Compose([
+            transforms.RandomResizedCrop((224,224), scale=(0.08, 1.0), interpolation=Image.BICUBIC),
+            transforms.RandomHorizontalFlip(),
+            transforms.ColorJitter(
+                brightness=0.4,
+                contrast=0.4,
+                saturation=0.4,
+            ),
+            transforms.ToTensor(),
+            Lighting(0.1, _IMAGENET_PCA['eigval'], _IMAGENET_PCA['eigvec']),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+
+        transform_test = transforms.Compose([
+            transforms.Resize(256, interpolation=Image.BICUBIC),
+            transforms.CenterCrop((224,224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+        dataset_info['mean'] = [0.485, 0.456, 0.406]
+        dataset_info['std'] = [0.229, 0.224, 0.225]
+        dataset_info['img_dims'] = (3,224,224)
+        dataset_info['num_labels'] = 1000
+    elif 'ohl_pipeline_imagenet' in dataset:
+        pre_transform_train = transforms.Compose([
+            transforms.RandomResizedCrop((224, 224), scale=(0.08, 1.0), interpolation=Image.BICUBIC),
+            transforms.RandomHorizontalFlip(),
+        ])
+        transform_train = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[1.,1.,1.])
+        ])
+
+        transform_test = transforms.Compose([
+            transforms.Resize(256, interpolation=Image.BICUBIC),
+            transforms.CenterCrop((224,224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[1.,1.,1.])
+        ])
+        dataset_info['mean'] = [0.485, 0.456, 0.406]
+        dataset_info['std'] = [0.229, 0.224, 0.225]
         dataset_info['img_dims'] = (3,224,224)
         dataset_info['num_labels'] = 1000
     else:
@@ -105,6 +166,8 @@ def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_
         pass
     else:
         raise ValueError('not found augmentations. %s' % C.get()['aug'])
+
+    transform_train.transforms.insert(0, pre_transform_train)
 
     if C.get()['cutout'] > 0:
         transform_train.transforms.append(CutoutDefault(C.get()['cutout']))
@@ -127,7 +190,7 @@ def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_
             transform_train = PILImageToHWCByteTensor()
             transform_test = PILImageToHWCByteTensor()
 
-    if dataset == 'cifar10':
+    if dataset in ('cifar10', 'pre_transform_cifar10'):
         total_trainset = torchvision.datasets.CIFAR10(root=dataroot, train=True, download=True, transform=transform_train)
         testset = torchvision.datasets.CIFAR10(root=dataroot, train=False, download=True, transform=transform_test)
     elif dataset == 'noised_cifar10':
@@ -136,7 +199,7 @@ def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_
     elif dataset == 'targetnoised_cifar10':
         total_trainset = TargetNoisedCIFAR10(root=dataroot, train=True, download=True, transform=transform_train)
         testset = torchvision.datasets.CIFAR10(root=dataroot, train=False, download=True, transform=transform_test)
-    elif dataset == 'cifar100':
+    elif dataset in ('cifar100', 'pre_transform_cifar100'):
         total_trainset = torchvision.datasets.CIFAR100(root=dataroot, train=True, download=True, transform=transform_train)
         testset = torchvision.datasets.CIFAR100(root=dataroot, train=False, download=True, transform=transform_test)
     elif dataset == 'tenclass_cifar100':
@@ -152,7 +215,7 @@ def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_
         extraset = torchvision.datasets.SVHN(root=dataroot, split='extra', download=True, transform=transform_train)
         total_trainset = ConcatDataset([trainset, extraset])
         testset = torchvision.datasets.SVHN(root=dataroot, split='test', download=True, transform=transform_test)
-    elif dataset == 'imagenet':
+    elif dataset in ('imagenet', 'ohl_pipeline_imagenet', 'smallwidth_imagenet'):
         # Ignore archive only means to not to try to extract the files again, because they already are and the zip files
         # are not there no more
         total_trainset = ImageNet(root=os.path.join(dataroot, 'imagenet-pytorch'), transform=transform_train, ignore_archive=True)

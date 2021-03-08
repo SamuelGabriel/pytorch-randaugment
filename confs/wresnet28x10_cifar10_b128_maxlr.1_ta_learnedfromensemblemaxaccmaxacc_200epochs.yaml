@@ -1,0 +1,25 @@
+model:
+  type: wresnet28_10
+dataset: cifar10
+aug: randaugment
+randaug:
+  N: 0
+  M: 0    # from appendix
+  weights: [0.0,1.0]
+cutout: 16
+batch: 128
+gpus: 1
+augmentation_search_space: fix_custom_woidentity
+custom_search_space_augs: ['sharpness', 'contrast', 'translate_x', 'translate_y', 'max_', 'brightness', 'crop_bilinear', 'color', 'solarize']
+epoch: 200
+lr: 0.05
+lr_schedule:
+  type: 'cosine'
+  warmup:
+    multiplier: 2
+    epoch: 5
+optimizer:
+  type: sgd
+  nesterov: True
+  decay: 0.0005
+

@@ -1,0 +1,17 @@
+    {'load_main_model': False,
+     'save_model': True,
+     'model': {'type': 'wresnet28_10'},
+     'dataset': 'svhncore',
+     'aug': 'randaugment',
+     'randaug': {'N': 0, 'M': 0, 'weights': [0.0,1.0]},
+     'augmentation_search_space': 'fix_custom',
+     'cutout': 16,
+     'batch': 128,
+     'gpus': 1,
+     'lr': 5.0e-3,
+     'seed': 2020,
+     'lr_schedule': {'type': 'cosine'},
+     'optimizer': {'type': 'sgd', 'nesterov': True, 'decay': 5.0e-3},
+     #'finite_difference_loss': True,
+     'throwaway_share_of_ds': {'throwaway_share': .2,'use_throwaway_as_val': True}
+    }
