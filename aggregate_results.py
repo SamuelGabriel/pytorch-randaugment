@@ -4,7 +4,7 @@ from os.path import isfile, join
 import re
 import argparse
 import numpy as np, scipy.stats as st
-def get_last_metric(path, metric):
+def get_last_metric(path, metric, get_step=None):
     onlyfiles = sorted([join(path,f) for f in listdir(path) if isfile(join(path, f))])
     last_point = 0
     v = None
@@ -13,6 +13,12 @@ def get_last_metric(path, metric):
         # top1 not found
         ea.Reload()
         try:
+            if get_step is not None:
+                for e in ea.Scalars(metric):
+                    last_point = e.step
+                    v = e.value
+                    if get_step is not None and last_point == get_step:
+                        return v, last_point
             e = ea.Scalars(metric)[-1]
             if e.step >= last_point:
                 if last_point > 0:
@@ -29,19 +35,17 @@ def get_results(logdir, mypath, split='test', metric='top1', assert_step=None):
     if mypath.endswith(suffix):
         mypath = mypath[:-len(suffix)]
     paths = [path for path in listdir(logdir) if re.search(f'{mypath}(_[0-9]+try|).yaml', path)]
-    if assert_step is None:
-        print([path[len(mypath):] for path in paths])
+    print([path[len(mypath):] for path in paths])
 
     paths = [join(join(logdir, path), split) for path in paths]
-    results = [get_last_metric(path, metric) for path in paths]
+    results = [get_last_metric(path, metric, get_step=assert_step) for path in paths]
     assert all([r[1] == results[0][1] for r in results]), results
     step = results[0][1]
     results = [r[0] for r in results]
     assert all(r is not None for r in results), results
     if assert_step is not None:
         assert assert_step == step, f'{assert_step} vs {step}'
-    else:
-        print(f"The results are the following {len(results)} at step {step}: {results}")
+    print(f"The results are the following {len(results)} at step {step}: {results}")
 
     results = np.array(results)
 
@@ -54,9 +58,10 @@ if __name__ == '__main__':
     parser.add_argument('--logdir', default='logs7')
     parser.add_argument('--split', default='test')
     parser.add_argument('--metric', default='top1', help='Can be e.g. top1, top5, loss, eval_top1')
+    parser.add_argument('--step', default=None, type=int)
     args = parser.parse_args()
     mypath = args.path.split('/')[-1] #'wresnet28x10_cifar100_4xb64_valsteps_maxlr.1_learnedrandprepreprocessorensemble_optwidelongsesp_50epochs_2_.0ent_no0augs_.001mlr_exploresm'
-    results = get_results(args.logdir,args.path,args.split,args.metric)
+    results = get_results(args.logdir,args.path,args.split,args.metric, assert_step=args.step)
     n = len(results)
     m, se = np.mean(results), st.sem(results)
     confidence = .95

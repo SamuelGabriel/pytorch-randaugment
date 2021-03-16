@@ -20,7 +20,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch.nn.parallel.data_parallel import DataParallel
 from torch.nn.parallel import DistributedDataParallel as DDP
-import torchvision
+from torchvision import transforms
 
 from tqdm import tqdm
 import yaml
@@ -40,6 +40,7 @@ from RandAugment.preprocessors import LearnedPreprocessorRandaugmentSpace, get_s
 from RandAugment.differentiable_preprocessor import DifferentiableLearnedPreprocessor
 from warmup_scheduler import GradualWarmupScheduler
 from RandAugment import google_augmentations
+from RandAugment.criterions import LabelSmoothCELoss
 
 from RandAugment.common import add_filehandler, recursive_backpack_memory_cleanup, get_gradients
 
@@ -80,7 +81,7 @@ def compute_preprocessor_gradients(model: nn.Module, meta_module: nn.Module, old
     # Now the preprocessor gradients hold the estimated meta gradient and the weights are left as is
     # The model holds the weights from before and the gradients are left as is
 
-def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='', epoch=0, writer=None, verbose=1, scheduler=None, preprocessor=None,sec_optimizer=None):
+def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='', epoch=0, writer=None, verbose=1, scheduler=None, preprocessor=None,sec_optimizer=None,sample_pairing_loader=None):
     tqdm_disable = bool(os.environ.get('TASK_NAME', ''))    # KakaoBrain Environment
     if verbose:
         logging_loader = tqdm(loader, disable=tqdm_disable)
@@ -124,6 +125,10 @@ def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='
     if finite_difference_loss: has_val_steps = True
     if 'next_step_loss' in C.get(): has_val_steps = True
     before_load_time = time()
+    if C.get().get('load_sample_pairing_batch',False) and sample_pairing_loader is not None:
+        sample_pairing_iter = iter(sample_pairing_loader)
+        google_augmentations.blend_images = [transforms.ToPILImage()(sample_pairing_loader.denorm(ti)) for ti in
+                                             next(sample_pairing_iter)[0]]
     for batch in logging_loader: # logging loader might be a loader or a loader wrapped into tqdm
         #print(f'full step time {time()-before_load_time}')
         #print(f'step {steps}')
@@ -131,6 +136,12 @@ def run_epoch(rank, worldsize, model, loader, loss_fn, optimizer, desc_default='
         data, label = batch[:2]
         steps += 1
         stime = time()
+        if C.get().get('load_sample_pairing_batch',False) and sample_pairing_loader is not None:
+            try:
+                google_augmentations.blend_images = [transforms.ToPILImage()(sample_pairing_loader.denorm(ti)) for ti in next(sample_pairing_iter)[0]]
+            except StopIteration:
+                print("Blend images iterator ended. If this is printed twice per loop, there is something out-of-order.")
+                pass
         if preprocessor:
             #print(f'pre back transform {time() - stime} data on {data.device}')
             data = [HWCByteTensorToPILImage()(ti) for ti in data]
@@ -359,7 +370,7 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
         model = model.to('cuda:0')
 
 
-    criterion = nn.CrossEntropyLoss()
+    criterion = LabelSmoothCELoss(C.get()['smooth'], num_class(C.get()['dataset'])) if 'smooth' in C.get() else nn.CrossEntropyLoss()
     if C.get()['optimizer']['type'] == 'sgd':
         optimizer = optim.SGD(
             model.parameters(),
@@ -527,7 +538,7 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
         model.train()
         if image_preprocessor: image_preprocessor.train()
         rs = dict()
-        rs['train'] = run_epoch(rank, worldsize,extend(model) if 'alignment_loss' in C.get() else model, trainloader, criterion, optimizer, desc_default='train', epoch=epoch, writer=writers[0], verbose=True, scheduler=scheduler, preprocessor=image_preprocessor, sec_optimizer=sec_optimizer)
+        rs['train'] = run_epoch(rank, worldsize,extend(model) if 'alignment_loss' in C.get() else model, trainloader, criterion, optimizer, desc_default='train', epoch=epoch, writer=writers[0], verbose=True, scheduler=scheduler, preprocessor=image_preprocessor, sec_optimizer=sec_optimizer, sample_pairing_loader=testtrainloader_)
         model.eval()
         if image_preprocessor: image_preprocessor.eval()
 

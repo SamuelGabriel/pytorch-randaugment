@@ -14,7 +14,7 @@ from sklearn.model_selection import StratifiedShuffleSplit
 from theconf import Config as C
 
 from RandAugment.augmentations import *
-from RandAugment.common import get_logger, RoundRobinDataLoader, copy_and_replace_transform, PILImageToHWCByteTensor, stratified_split, RepeatDataLoader
+from RandAugment.common import get_logger, RoundRobinDataLoader, copy_and_replace_transform, PILImageToHWCByteTensor, stratified_split, RepeatDataLoader, denormalize
 from RandAugment.dataset.noised_cifar10 import NoisedCIFAR10, TargetNoisedCIFAR10
 from RandAugment.dataset.subsampled_cifar100 import get_fiftyexample_CIFAR100_trainandval, get_tenclass_CIFAR100_trainandval
 from RandAugment.imagenet import ImageNet
@@ -151,7 +151,7 @@ def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[1.,1.,1.])
         ])
         dataset_info['mean'] = [0.485, 0.456, 0.406]
-        dataset_info['std'] = [0.229, 0.224, 0.225]
+        dataset_info['std'] = [1.,1.,1.]
         dataset_info['img_dims'] = (3,224,224)
         dataset_info['num_labels'] = 1000
     else:
@@ -248,7 +248,10 @@ def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_
 
     if distributed:
         assert split == 0.0, "Split not supported for distributed training."
-        train_sampler = DistributedSampler(total_trainset)
+        if C.get().get('all_workers_use_the_same_batches', False):
+            train_sampler = DistributedSampler(total_trainset, num_replicas=1, rank=0)
+        else:
+            train_sampler = DistributedSampler(total_trainset)
         test_sampler = None
         test_train_sampler = None # if these are specified, acc/loss computation is wrong for results.
         # while one has to say, that this setting leads to the test sets being computed seperately on each gpu which
@@ -328,6 +331,7 @@ def get_dataloaders(dataset, batch, dataroot, split=0.15, split_idx=0, get_meta_
         test_total_trainset, batch_size=batch, shuffle=False, num_workers=0 if started_with_spawn else 8, pin_memory=True,
         drop_last=False, sampler=test_train_sampler
     )
+    test_trainloader.denorm = lambda x: denormalize(x, dataset_info['mean'], dataset_info['std'])
     return train_sampler, trainloader, validloader, testloader, test_trainloader, dataset_info
 
 

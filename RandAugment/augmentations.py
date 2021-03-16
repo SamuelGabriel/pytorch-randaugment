@@ -5,7 +5,7 @@ import PIL, PIL.ImageOps, PIL.ImageEnhance, PIL.ImageDraw
 import numpy as np
 import torch
 
-from RandAugment import google_augmentations, google_augmentations_closer_version, autoaugment
+from RandAugment import google_augmentations, google_augmentations_closer_version, autoaugment, fast_autoaugment
 
 
 def CutoutAbs(img, v):  # [0, 60] => percentage: [0, 0.2]
@@ -93,6 +93,11 @@ def get_randaugment(n,m,weights,bs):
         return autoaugment.SVHNAutoAugment(fixed_posterize=False)
     if n == 202 and m == 202:
         return autoaugment.SVHNAutoAugment(fixed_posterize=False)
+    if n == 301 and m == 301:
+        return fast_autoaugment.cifar10_faa
+    if n == 401 and m == 401:
+        return fast_autoaugment.svhn_faa
+    assert m < 100 and n < 100
     if m < 0 and n < 0:
         return google_augmentations_closer_version.RandAugment(-n,-m)
     if m == 0:

@@ -5,6 +5,7 @@ import random
 import PIL, PIL.ImageOps, PIL.ImageEnhance, PIL.ImageDraw
 import numpy as np
 import torch
+import re
 from PIL import ImageOps, ImageEnhance, ImageFilter, Image
 import random
 from dataclasses import dataclass
@@ -283,6 +284,24 @@ brightness = TransformT('Brightness', _enhancer_impl(
     ImageEnhance.Brightness))
 sharpness = TransformT('Sharpness', _enhancer_impl(ImageEnhance.Sharpness))
 
+def _mirrored_enhancer_impl(enhancer, minimum=None, maximum=None):
+    """Sets level to be between 0.1 and 1.8 for ImageEnhance transforms of PIL."""
+    def impl(pil_img, level):
+        mini = min_max_vals.enhancer.min if minimum is None else minimum
+        maxi = min_max_vals.enhancer.max if maximum is None else maximum
+        assert mini == 0., "This enhancer is used with a strength space that is mirrored around one."
+        v = float_parameter(level, maxi-mini) + mini  # going to 0 just destroys it
+        if random.random() < .5:
+            v = -v
+        return enhancer(pil_img).enhance(1.+v)
+    return impl
+
+mirrored_color = TransformT('Color', _mirrored_enhancer_impl(ImageEnhance.Color))
+mirrored_contrast = TransformT('Contrast', _mirrored_enhancer_impl(ImageEnhance.Contrast))
+mirrored_brightness = TransformT('Brightness', _mirrored_enhancer_impl(
+    ImageEnhance.Brightness))
+mirrored_sharpness = TransformT('Sharpness', _mirrored_enhancer_impl(ImageEnhance.Sharpness))
+
 def CutoutDefault(img, v):  # [0, 60] => percentage: [0, 0.2]
     # assert 0 <= v <= 20
     if v <= 0:
@@ -387,17 +406,17 @@ ALL_TRANSFORMS = [
     identity,
     auto_contrast,
     equalize,
-    rotate,
+    rotate, # extra coin-flip
     solarize,
-    color,
+    color, # enhancer
     posterize,
-    contrast,
-    brightness,
-    sharpness,
-    shear_x,
-    shear_y,
-    translate_x,
-    translate_y
+    contrast, # enhancer
+    brightness, # enhancer
+    sharpness, # enhancer
+    shear_x, # extra coin-flip
+    shear_y, # extra coin-flip
+    translate_x, # extra coin-flip
+    translate_y #extra coin-flip
 ]
 
 min_max_vals = MinMaxVals()
@@ -419,6 +438,16 @@ def set_search_space(search_space, parameter_max, custom_search_space_augs):
         min_max_vals = MinMaxVals(
             posterize=MinMax(4,8),
             translate=MinMax(0, 14.4)
+        )
+    elif 'fixmirror' in search_space:
+        min_max_vals = MinMaxVals(
+            posterize=MinMax(4,8),
+            enhancer=MinMax(0.,.9)
+        )
+    elif 'fiximagenet' in search_space:
+        min_max_vals = MinMaxVals(
+            posterize=MinMax(4,8),
+            translate=MinMax(0,70)
         )
     elif 'fix' in search_space:
         min_max_vals = MinMaxVals(
@@ -523,6 +552,28 @@ def set_search_space(search_space, parameter_max, custom_search_space_augs):
             median,
             gaussian
         ]
+    elif 'rasubsetof' in search_space:
+        r = re.findall(r'rasubsetof(\d+)', search_space)
+        assert len(r) == 1
+        ALL_TRANSFORMS = random.sample(ALL_TRANSFORMS, int(r[0]))
+        print(f"Subsampled {len(ALL_TRANSFORMS)} augs: {ALL_TRANSFORMS}")
+    elif 'fixmirror'in search_space:
+        ALL_TRANSFORMS = [
+            identity,
+            auto_contrast,
+            equalize,
+            rotate,
+            solarize,
+            mirrored_color,  # enhancer
+            posterize,
+            mirrored_contrast,  # enhancer
+            mirrored_brightness,  # enhancer
+            mirrored_sharpness,  # enhancer
+            shear_x,
+            shear_y,
+            translate_x,
+            translate_y
+        ]
     elif 'long' in search_space:
         ALL_TRANSFORMS = [
             identity,
@@ -594,6 +645,25 @@ def set_search_space(search_space, parameter_max, custom_search_space_augs):
             rotate,
             opt_black,
             opt_labelnoise
+        ]
+    elif 'autoaug_paper' in search_space:
+        ALL_TRANSFORMS = [
+            shear_x,
+            shear_y,
+            translate_x,
+            translate_y,
+            rotate,
+            auto_contrast,
+            invert,
+            equalize,
+            solarize,
+            posterize,
+            contrast,
+            color,
+            brightness,
+            sharpness,
+            cutout,
+            sample_pairing
         ]
     elif 'autoaug' in search_space:
         ALL_TRANSFORMS = [

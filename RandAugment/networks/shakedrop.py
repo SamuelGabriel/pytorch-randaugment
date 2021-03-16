@@ -18,7 +18,7 @@ class ShakeDropFunction(torch.autograd.Function):
                 alpha = alpha.view(alpha.size(0), 1, 1, 1).expand_as(x)
                 return alpha * x
             else:
-                return x
+                return x.clone()
         else:
             return (1 - p_drop) * x
 
@@ -31,7 +31,7 @@ class ShakeDropFunction(torch.autograd.Function):
             beta = Variable(beta)
             return beta * grad_output, None, None, None
         else:
-            return grad_output, None, None, None
+            return grad_output.clone(), None, None, None
 
 
 class ShakeDrop(nn.Module):

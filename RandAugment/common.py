@@ -375,3 +375,10 @@ class Gradients():
                 model_g.add_(this_g)
 
 
+def denormalize(img, mean, std):
+    mean, std = torch.tensor(mean).to(img.device), torch.tensor(std).to(img.device)
+    return img.mul_(std[:,None,None]).add_(mean[:,None,None])
+
+def normalize(img, mean, std):
+    mean, std = torch.tensor(mean).to(img.device), torch.tensor(std).to(img.device)
+    return img.sub_(mean[:,None,None]).div_(std[:,None,None])

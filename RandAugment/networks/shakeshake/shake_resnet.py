@@ -14,7 +14,11 @@ class ShakeBlock(nn.Module):
     def __init__(self, in_ch, out_ch, stride=1):
         super(ShakeBlock, self).__init__()
         self.equal_io = in_ch == out_ch
-        self.shortcut = self.equal_io and None or Shortcut(in_ch, out_ch, stride=stride)
+        if self.equal_io:
+            self.shortcut = lambda x: x
+        else:
+            self.shortcut = Shortcut(in_ch, out_ch, stride=stride)
+        #self.shortcut = self.equal_io and None or Shortcut(in_ch, out_ch, stride=stride)
 
         self.branch1 = self._make_branch(in_ch, out_ch, stride)
         self.branch2 = self._make_branch(in_ch, out_ch, stride)
@@ -23,7 +27,8 @@ class ShakeBlock(nn.Module):
         h1 = self.branch1(x)
         h2 = self.branch2(x)
         h = ShakeShake.apply(h1, h2, self.training)
-        h0 = x if self.equal_io else self.shortcut(x)
+        #h0 = x if self.equal_io else self.shortcut(x)
+        h0 = self.shortcut(x)
         return h + h0
 
     def _make_branch(self, in_ch, out_ch, stride=1):
