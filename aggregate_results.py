@@ -60,7 +60,7 @@ if __name__ == '__main__':
     parser.add_argument('--metric', default='top1', help='Can be e.g. top1, top5, loss, eval_top1')
     parser.add_argument('--step', default=None, type=int)
     args = parser.parse_args()
-    mypath = args.path.split('/')[-1] #'wresnet28x10_cifar100_4xb64_valsteps_maxlr.1_learnedrandprepreprocessorensemble_optwidelongsesp_50epochs_2_.0ent_no0augs_.001mlr_exploresm'
+    mypath = args.path.split('/')[-1]
     results = get_results(args.logdir,args.path,args.split,args.metric, assert_step=args.step)
     n = len(results)
     m, se = np.mean(results), st.sem(results)

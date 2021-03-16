@@ -2,6 +2,11 @@
 
 Unofficial PyTorch Reimplementation of RandAugment. Most of codes are from [Fast AutoAugment](https://github.com/kakaobrain/fast-autoaugment).
 
+
+Install PyTorch version for your setup.
+pip install -r requirements.txt
+Example: python -m TrivialAugment.train -c confs/wresnet40x2_cifar100_b128_maxlr.1_ta_fixedsesp_nowarmup_200epochs.yaml --dataroot data
+
 ## Introduction
 
 TODO
@@ -16,7 +21,7 @@ $ pip install git+https://github.com/ildoonet/pytorch-randaugment
 
 ```python
 from torchvision.transforms import transforms
-from RandAugment import RandAugment
+from TrivialAugment import RandAugment
 
 transform_train = transforms.Compose([
     transforms.RandomCrop(32, padding=4),
@@ -25,7 +30,7 @@ transform_train = transforms.Compose([
     transforms.Normalize(_CIFAR_MEAN, _CIFAR_STD),
 ])
 
-# Add RandAugment with N, M(hyperparameter)
+# Add TrivialAugment with N, M(hyperparameter)
 transform_train.transforms.insert(0, RandAugment(N, M))
 ```
 

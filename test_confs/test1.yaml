@@ -1,9 +1,0 @@
-hi:
-  def_set:
-    - 1
-    - 2
-  noset: hi
-
-love_set:
-  - hi
-  - 3
