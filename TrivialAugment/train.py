@@ -139,8 +139,8 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
     else:
         from tensorboardX import SummaryWriter
 
-    os.makedirs('./test_logs/', exist_ok=True)
-    writers = [SummaryWriter(log_dir='./test_logs/%s/%s' % (tag, x)) for x in ['train', 'valid', 'test', 'testtrain']]
+    os.makedirs('./logs/', exist_ok=True)
+    writers = [SummaryWriter(log_dir='./logs/%s/%s' % (tag, x)) for x in ['train', 'valid', 'test', 'testtrain']]
 
     aug_lib.set_search_space(C.get().get('augmentation_search_space', 'standard'), C.get().get('augmentation_parameter_max', 30), C.get().get('custom_search_space_augs', None))
     max_epoch = C.get()['epoch']

@@ -1,10 +1,6 @@
-# code in this file is adpated from rpmcruz/autoaugment
-# https://github.com/rpmcruz/autoaugment/blob/master/transformations.py
-
-import PIL, PIL.ImageOps, PIL.ImageEnhance, PIL.ImageDraw
 import numpy as np
 import re
-from PIL import ImageOps, ImageEnhance, ImageFilter, Image
+from PIL import ImageOps, ImageEnhance, ImageFilter, Image, ImageDraw
 import random
 from dataclasses import dataclass
 from typing import Union
@@ -342,7 +338,7 @@ def CutoutDefault(img, v):  # [0, 60] => percentage: [0, 0.2]
     xy = (x0, y0, x1, y1)
     color = (0, 0, 0)
     img = img.copy()
-    PIL.ImageDraw.Draw(img).rectangle(xy, color)
+    ImageDraw.Draw(img).rectangle(xy, color)
     return img
 
 

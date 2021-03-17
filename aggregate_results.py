@@ -55,7 +55,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Get Top1 Results.')
     parser.add_argument('path',
                    help='Prefix of the paths/conf files for the runs to evaluate.')
-    parser.add_argument('--logdir', default='logs7')
+    parser.add_argument('--logdir', default='logs')
     parser.add_argument('--split', default='test')
     parser.add_argument('--metric', default='top1', help='Can be e.g. top1, top5, loss, eval_top1')
     parser.add_argument('--step', default=None, type=int)
