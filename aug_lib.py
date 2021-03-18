@@ -23,7 +23,6 @@ class MinMaxVals:
     cutout: MinMax = MinMax(.0, .2)
 
 
-PARAMETER_MAX = 30  # What is the max 'level' a transform could be predicted
 
 
 def float_parameter(level, maxval):
@@ -362,30 +361,12 @@ def blend(img1, v):
 
 sample_pairing = TransformT('SamplePairing', blend)
 
-ALL_TRANSFORMS = [
-    identity,
-    auto_contrast,
-    equalize,
-    rotate,  # extra coin-flip
-    solarize,
-    color,  # enhancer
-    posterize,
-    contrast,  # enhancer
-    brightness,  # enhancer
-    sharpness,  # enhancer
-    shear_x,  # extra coin-flip
-    shear_y,  # extra coin-flip
-    translate_x,  # extra coin-flip
-    translate_y  # extra coin-flip
-]
 
-min_max_vals = MinMaxVals()
-
-
-def set_search_space(search_space, parameter_max, custom_search_space_augs):
+def set_augmentation_space(augmentation_space, num_strengths, custom_augmentation_space_augs=None):
     global ALL_TRANSFORMS, min_max_vals, PARAMETER_MAX
-    PARAMETER_MAX = parameter_max
-    if 'wide' in search_space:
+    assert num_strengths > 0
+    PARAMETER_MAX = num_strengths - 1
+    if 'wide' in augmentation_space:
         min_max_vals = MinMaxVals(
             shear=MinMax(.0, .99),
             translate=MinMax(0, 32),
@@ -395,26 +376,26 @@ def set_search_space(search_space, parameter_max, custom_search_space_augs):
             enhancer=MinMax(.01, 2.),
             cutout=MinMax(.0, .6),
         )
-    elif ('uniaug' in search_space) or ('randaug' in search_space):
+    elif ('uniaug' in augmentation_space) or ('randaug' in augmentation_space):
         min_max_vals = MinMaxVals(
             posterize=MinMax(4, 8),
             translate=MinMax(0, 14.4)
         )
-    elif 'fixmirror' in search_space:
+    elif 'fixmirror' in augmentation_space:
         min_max_vals = MinMaxVals(
             posterize=MinMax(4, 8),
             enhancer=MinMax(0., .9)
         )
-    elif 'fiximagenet' in search_space:
+    elif 'fiximagenet' in augmentation_space:
         min_max_vals = MinMaxVals(
             posterize=MinMax(4, 8),
             translate=MinMax(0, 70)
         )
-    elif 'fix' in search_space:
+    elif 'fix' in augmentation_space:
         min_max_vals = MinMaxVals(
             posterize=MinMax(4, 8)
         )
-    elif 'ohl' in search_space:
+    elif 'ohl' in augmentation_space:
         assert PARAMETER_MAX == 2
         min_max_vals = MinMaxVals(
             shear=MinMax(.1, .3),
@@ -425,8 +406,10 @@ def set_search_space(search_space, parameter_max, custom_search_space_augs):
             enhancer=MinMax(1.3, 1.9),
             cutout=MinMax(.0, .6),
         )
+    else:
+        min_max_vals = MinMaxVals()
 
-    if 'xlong' in search_space:
+    if 'xlong' in augmentation_space:
         ALL_TRANSFORMS = [
             identity,
             auto_contrast,
@@ -457,12 +440,12 @@ def set_search_space(search_space, parameter_max, custom_search_space_augs):
             median,
             gaussian
         ]
-    elif 'rasubsetof' in search_space:
-        r = re.findall(r'rasubsetof(\d+)', search_space)
+    elif 'rasubsetof' in augmentation_space:
+        r = re.findall(r'rasubsetof(\d+)', augmentation_space)
         assert len(r) == 1
         ALL_TRANSFORMS = random.sample(ALL_TRANSFORMS, int(r[0]))
         print(f"Subsampled {len(ALL_TRANSFORMS)} augs: {ALL_TRANSFORMS}")
-    elif 'fixmirror' in search_space:
+    elif 'fixmirror' in augmentation_space:
         ALL_TRANSFORMS = [
             identity,
             auto_contrast,
@@ -479,7 +462,7 @@ def set_search_space(search_space, parameter_max, custom_search_space_augs):
             translate_x,
             translate_y
         ]
-    elif 'long' in search_space:
+    elif 'long' in augmentation_space:
         ALL_TRANSFORMS = [
             identity,
             auto_contrast,
@@ -502,7 +485,7 @@ def set_search_space(search_space, parameter_max, custom_search_space_augs):
             flip_ud,
             cutout
         ]
-    elif 'uniaug' in search_space:
+    elif 'uniaug' in augmentation_space:
         ALL_TRANSFORMS = [
             identity,
             shear_x,
@@ -521,7 +504,7 @@ def set_search_space(search_space, parameter_max, custom_search_space_augs):
             sharpness,
             cutout  # only uniaug
         ]
-    elif 'autoaug_paper' in search_space:
+    elif 'autoaug_paper' in augmentation_space:
         ALL_TRANSFORMS = [
             shear_x,
             shear_y,
@@ -540,7 +523,7 @@ def set_search_space(search_space, parameter_max, custom_search_space_augs):
             cutout,
             sample_pairing
         ]
-    elif 'full' in search_space:
+    elif 'full' in augmentation_space:
         ALL_TRANSFORMS = [
             flip_lr,
             flip_ud,
@@ -563,7 +546,7 @@ def set_search_space(search_space, parameter_max, custom_search_space_augs):
             blur,
             smooth
         ]
-    elif 'ohl' in search_space:
+    elif 'ohl' in augmentation_space:
         ALL_TRANSFORMS = [
             shear_x,  # ok
             shear_y,  # ok
@@ -580,10 +563,10 @@ def set_search_space(search_space, parameter_max, custom_search_space_augs):
             equalize,
             invert
         ]
-    elif 'custom' in search_space:
-        assert custom_search_space_augs is not None
+    elif 'custom' in augmentation_space:
+        assert custom_augmentation_space_augs is not None
 
-        custom_search_space_augs_mapping = {
+        custom_augmentation_space_augs_mapping = {
             'identity': identity,
             'auto_contrast': auto_contrast,
             'equalize': equalize,
@@ -614,15 +597,32 @@ def set_search_space(search_space, parameter_max, custom_search_space_augs):
             'median': median,
             'gaussian': gaussian
         }
-        ALL_TRANSFORMS = [] if 'woidentity' in search_space else [identity]
+        ALL_TRANSFORMS = []
         ALL_TRANSFORMS += [
-            custom_search_space_augs_mapping[aug] for aug in custom_search_space_augs
+            custom_augmentation_space_augs_mapping[aug] for aug in custom_augmentation_space_augs
         ]
         print("CUSTOM Augs set to:", ALL_TRANSFORMS)
     else:
-        print("Using standard aug ops.")
-        if 'standard' not in search_space:
-            raise ValueError(f"Unknown search space {search_space}")
+        if 'standard' not in augmentation_space:
+            raise ValueError(f"Unknown search space {augmentation_space}")
+        ALL_TRANSFORMS = [
+            identity,
+            auto_contrast,
+            equalize,
+            rotate,  # extra coin-flip
+            solarize,
+            color,  # enhancer
+            posterize,
+            contrast,  # enhancer
+            brightness,  # enhancer
+            sharpness,  # enhancer
+            shear_x,  # extra coin-flip
+            shear_y,  # extra coin-flip
+            translate_x,  # extra coin-flip
+            translate_y  # extra coin-flip
+        ]
+
+set_augmentation_space('fixed_standard', 31)
 
 
 def apply_augmentation(aug_idx, m, img):
@@ -658,9 +658,8 @@ class UniAugment:
     def __call__(self, img):
         ops = random.choices(ALL_TRANSFORMS, k=2)
         for op in ops:
-            probability = random.random()
             level = random.randint(0, PARAMETER_MAX)
-            img = op.pil_transformer(probability, level)(img)
+            img = op.pil_transformer(0.5, level)(img)
         return img
 
 

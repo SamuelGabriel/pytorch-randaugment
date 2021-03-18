@@ -1,12 +1,12 @@
 # Trivial Augment
 
 This is the official implementation of TrivialAugment, as was used for the paper.
-We distribute this implementation with 2 main use cases in mind.
+We distribute this implementation with two main use cases in mind.
 Either you only use our (re-)implementetations of practical augmentation methods or you start off with our full codebase.
 
 ## Use TrivialAugment and Other Methods in Your Own Codebase
 In this case we recommend to simply copy over the file `aug_lib.py` to your codebase.
-You can now instantiate the augmenters `TrivialAugment`, `RandAugment` and `UniformAugment` like this:
+You can now instantiate the augmenters `TrivialAugment`, `RandAugment` and `UniAugment` like this:
 ```
 augmenter = aug_lib.TrivialAugment()
 ```
@@ -15,7 +15,20 @@ And simply use them on a PIL images `img`:
 aug_img = augmenter(img)
 ```
 This format also happens to be compatible with `torchvision.transforms`.
-If you happen to not have `Pillow` or `numpy` installed, do so by calling `pip install Pillow numpy`.
+If you do not have `Pillow` or `numpy` installed, do so by calling `pip install Pillow numpy`.
+Generally, a good position to augment an image with the `augmenter` is right as you get it out of the dataset, before you apply any custom augmentations.
+
+The default augmentation space is `fixed_standard`, that is without AutoAugments posterization bug and using the set of augmentations used in Randaugment.
+This is the search space we used for all our experiments, that do not mention another augmentation space.
+You can change the augmentation space, though, with `aug_lib.set_augmentation_space`.
+This call for example
+```
+aug_lib.set_augmentation_space('fixed_custom',2,['cutout'])
+```
+will change the augmentation space to only ever apply cutout with a large width or nothing.
+The 2 here gives indications in how many strength levels the strength ranges of the augmentation space should be divided.
+If an augmentation space includes `sample_pairing`, you need to specify a set of images with which to pair before each step:
+`aug_lib.blend_images = [LIST OF PIL IMAGES]`.
 
 ## Use Our Full Codebase
 Clone this directory and `cd` into it.
