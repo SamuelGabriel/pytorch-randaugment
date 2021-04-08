@@ -12,9 +12,12 @@ cutout: 0
 batch: 16
 gpus: 32
 epoch: 270
-lr: .8
+lr: .2
 lr_schedule:
   type: 'resnet'
+  warmup:
+    multiplier: 4
+    epoch: 3
 optimizer:
   type: sgd
   nesterov: True # not in original

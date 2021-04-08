@@ -7,27 +7,27 @@ import numpy as np, scipy.stats as st
 def get_last_metric(path, metric, get_step=None):
     onlyfiles = sorted([join(path,f) for f in listdir(path) if isfile(join(path, f))])
     last_point = 0
-    v = None
+    result_e = event_accumulator.ScalarEvent(0.0,0,None)
     for f in onlyfiles:
         ea = event_accumulator.EventAccumulator(f)
         # top1 not found
         ea.Reload()
         try:
+            first_e = ea.Scalars(metric)[0]
             if get_step is not None:
                 for e in ea.Scalars(metric):
-                    last_point = e.step
-                    v = e.value
                     if get_step is not None and last_point == get_step:
-                        return v, last_point
+                        return e._replace(wall_time=e.wall_time-first_e.wall_time)
             e = ea.Scalars(metric)[-1]
             if e.step >= last_point:
                 if last_point > 0:
-                    print("Warning: Multiple runs with one name:", f, "other result:", v, 'at', last_point)
+                    print("Warning: Multiple runs with one name:", f, "other result:", result_e.value, 'at', last_point)
                 last_point = e.step
-                v = e.value
+                result_e = e._replace(wall_time=e.wall_time-first_e.wall_time)
         except Exception as e:
             print(e)
-    return v, last_point
+    return result_e # has .step, .value and .wall_time
+
 
 def get_results(logdir, mypath, split='test', metric='top1', assert_step=None):
     mypath = mypath.split('/')[-1]
@@ -39,13 +39,15 @@ def get_results(logdir, mypath, split='test', metric='top1', assert_step=None):
 
     paths = [join(join(logdir, path), split) for path in paths]
     results = [get_last_metric(path, metric, get_step=assert_step) for path in paths]
-    assert all([r[1] == results[0][1] for r in results]), results
-    step = results[0][1]
-    results = [r[0] for r in results]
+    assert all([r.step == results[0].step for r in results]), results
+    step = results[0].step
+    times = np.array([r.wall_time/60/60 for r in results])
+    results = [r.value for r in results]
     assert all(r is not None for r in results), results
     if assert_step is not None:
         assert assert_step == step, f'{assert_step} vs {step}'
     print(f"The results are the following {len(results)} at step {step}: {results}")
+    print(f'Average run hours:', np.mean(times), 'Min hours:', np.min(times), 'Max hours:', np.max(times))
 
     results = np.array(results)
 

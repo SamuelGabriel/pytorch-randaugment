@@ -1,5 +1,5 @@
 model:
-  type: wresnet28_10
+  type: wresnet40_2
 dataset: cifar10
 aug: randaugment
 randaug:
@@ -9,7 +9,7 @@ randaug:
 cutout: 16
 batch: 128
 gpus: 1
-augmentation_search_space: wide_standard
+augmentation_search_space: medium_standard
 epoch: 200
 lr: 0.1
 lr_schedule:

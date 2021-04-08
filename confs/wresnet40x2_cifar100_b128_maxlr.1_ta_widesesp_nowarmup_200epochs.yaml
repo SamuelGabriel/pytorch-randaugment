@@ -1,6 +1,6 @@
 model:
-  type: wresnet28_10
-dataset: cifar10
+  type: wresnet40_2
+dataset: cifar100
 aug: randaugment
 randaug:
   N: 0

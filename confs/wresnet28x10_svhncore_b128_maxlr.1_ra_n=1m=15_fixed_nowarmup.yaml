@@ -1,21 +1,18 @@
 model:
   type: wresnet28_10
-dataset: cifar10
+dataset: svhncore
 aug: randaugment
+augmentation_search_space: fixed_standard
 randaug:
-  N: 0
-  M: 0    # from appendix
-  weights: [0.0,1.0]
+  N: 1
+  M: 15    # from appendix
 cutout: 16
 batch: 128
-gpus: 1
-augmentation_search_space: wide_standard
 epoch: 200
-lr: 0.1
+lr: 0.005
 lr_schedule:
   type: 'cosine'
 optimizer:
   type: sgd
   nesterov: True
-  decay: 0.0005
-
+  decay: 0.005

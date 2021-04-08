@@ -434,6 +434,16 @@ def set_search_space(search_space, parameter_max, custom_search_space_augs):
             enhancer=MinMax(.01,2.),
             cutout=MinMax(.0,.6),
         )
+    elif 'medium' in search_space:
+        min_max_vals = MinMaxVals(
+            shear=MinMax(.0, .8),
+            translate=MinMax(0, 16),
+            rotate=MinMax(0, 45),
+            solarize=MinMax(0, 256),
+            posterize=MinMax(2, 8),
+            enhancer=MinMax(.01, 2.),
+            cutout=MinMax(.0, .6),
+        )
     elif ('uniaug' in search_space) or ('randaug' in search_space) or ('opt_ua' in search_space):
         min_max_vals = MinMaxVals(
             posterize=MinMax(4,8),
@@ -824,6 +834,19 @@ class UniAugmentWeighted:
         ops = random.choices(ALL_TRANSFORMS, k=k)
         for op in ops:
             level = random.randint(0, PARAMETER_MAX)
+            img = op.pil_transformer(1., level)(img)
+        return img
+
+class UniAugmentWeightedUpToM:
+    def __init__(self, max_m, probs):
+        self.max_m = max_m
+        self.probs = probs # [prob of zero augs, prob of one aug, ..]
+
+    def __call__(self, img):
+        k = random.choices(range(len(self.probs)), self.probs)[0]
+        ops = random.choices(ALL_TRANSFORMS, k=k)
+        for op in ops:
+            level = random.randint(0, self.max_m)
             img = op.pil_transformer(1., level)(img)
         return img
 

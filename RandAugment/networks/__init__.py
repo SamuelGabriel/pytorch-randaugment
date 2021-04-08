@@ -16,6 +16,8 @@ from RandAugment.common import apply_weightnorm
 
 from RandAugment.meta_state_adaption import AdaptiveDropouter, Modulator
 
+from efficientnet_pytorch import EfficientNet
+
 
 # example usage get_model(
 def get_model(conf, bs, val_bs, optimizer_creator_factory, num_class=10, writer=None):
@@ -79,6 +81,8 @@ def get_model(conf, bs, val_bs, optimizer_creator_factory, num_class=10, writer=
 
     elif name == 'pyramid':
         model = PyramidNet('cifar10', depth=conf['depth'], alpha=conf['alpha'], num_classes=num_class, bottleneck=conf['bottleneck'])
+    elif name.startswith('efficientnet-b'):
+        model = EfficientNet.from_name(name)
     else:
         raise NameError('no model named, %s' % name)
 

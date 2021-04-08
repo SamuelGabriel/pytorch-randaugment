@@ -85,6 +85,8 @@ class CutoutDefault(object):
 
 
 def get_randaugment(n,m,weights,bs):
+    if n == 1000:
+        return google_augmentations.UniAugmentWeightedUpToM(max_m=m, probs=weights)
     if n == 101 and m == 101:
         return autoaugment.CifarAutoAugment(fixed_posterize=False)
     if n == 102 and m == 102:

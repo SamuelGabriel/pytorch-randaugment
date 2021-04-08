@@ -1,15 +1,14 @@
 model:
   type: wresnet28_10
-dataset: cifar10
+dataset: cifar100
 aug: randaugment
 randaug:
-  N: 0
-  M: 0    # from appendix
-  weights: [0.0,1.0]
+  N: 1
+  M: 15    # from appendix
 cutout: 16
 batch: 128
 gpus: 1
-augmentation_search_space: wide_standard
+augmentation_search_space: fixed_standard
 epoch: 200
 lr: 0.1
 lr_schedule:

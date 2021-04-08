@@ -379,6 +379,14 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
             weight_decay=C.get()['optimizer']['decay'],
             nesterov=C.get()['optimizer']['nesterov']
         )
+    elif C.get()['optimizer']['type'] == 'rmsprop':
+            optimizer = optim.RMSprop(
+                model.parameters(),
+                lr=C.get()['lr'],
+                momentum=C.get()['optimizer'].get('momentum', 0.9),
+                weight_decay=C.get()['optimizer']['decay'],
+                alpha=C.get()['optimizer']['alpha']
+            )
     elif C.get()['optimizer']['type'] == 'adam':
         optimizer = optim.Adam(
             model.parameters(),
@@ -398,6 +406,8 @@ def train_and_eval(rank, worldsize, tag, dataroot, test_ratio=0.0, cv_fold=0, re
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=C.get()['epoch'], eta_min=0.)
     elif lr_scheduler_type == 'resnet':
         scheduler = adjust_learning_rate_resnet(optimizer)
+    elif lr_scheduler_type == 'exponential':
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer,gamma=C.get()['lr_schedule']['gamma'])
     elif lr_scheduler_type == 'constant':
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda e: 1.)
     else:

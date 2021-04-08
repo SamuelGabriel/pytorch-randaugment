@@ -9,6 +9,7 @@ import yaml
 import pickle
 import numpy as np
 import time
+import traceback
 
 
 
@@ -44,9 +45,12 @@ def wait_for_runs(population):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('base_config')
     parser.add_argument('--epochs', type=int, default=200)
     parser.add_argument('--log_file', default=None)
+    parser.add_argument('--N_min', default=1, type=int)
+    parser.add_argument('--N_max', default=3, type=int)
+    parser.add_argument('--aug_probs', default=None, nargs='+') # Usage: --aug_probs 0.0 1.0
+    parser.add_argument('base_config')
 
     args = parser.parse_args()
 
@@ -59,14 +63,14 @@ if __name__ == '__main__':
     # executor is the submission interface (logs are dumped in the folder)
     executor = submitit.AutoExecutor(folder="log_test")
     # set timeout in min, and partition for running the job
-    executor.update_parameters(timeout_min=60*24, slurm_partition="alldlc_gpu-rtx2080", slurm_gres='gpu:1',
+    executor.update_parameters(timeout_min=60*24, slurm_partition="ml_gpu-rtx2080", slurm_gres='gpu:1',
                               slurm_setup=['export MKL_THREADING_LAYER=GNU'], slurm_exclude='dlcgpu02,dlcgpu18')
 
 
     runs = []
-    for N in range(1,4):
+    for N in range(args.N_min,args.N_max+1):
         for M in range(1,31):
-            config = {'N': N, 'M': M}
+            config = {'N': N, 'M': M, 'weights': [float(p) for p in args.aug_probs]}
             runs.append(executor.submit(run_conf, config, args))
 
 
@@ -77,6 +81,7 @@ if __name__ == '__main__':
             results[(result[0]['N'], result[0]['M'])] = result[1]
         except:
             print("Some exception happened")
+            traceback.print_exc()
 
     print(results)
     if args.log_file is not None:

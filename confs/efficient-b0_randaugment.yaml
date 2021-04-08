@@ -1,6 +1,5 @@
-load_main_model: true
 model:
-  type: resnet200
+  type: efficientnet-b0
 dataset: smallwidth_imagenet
 aug: randaugment
 augmentation_search_space: fixed_standard # they used 224 x 244
@@ -9,18 +8,17 @@ randaug:
   M: 0
   weights: [0.0,1.0]
 cutout: 0
-batch: 16
+batch: 64
 gpus: 32
 epoch: 270
-lr: .8
+lr: .256
 lr_schedule:
-  type: 'resnet'
+  type: 'exponential'
+  gamma: 0.9873888589
 optimizer:
-  type: sgd
-  nesterov: True # not in original
-  decay: 0.0001
+  type: rmsprop
+  decay: 1.0e-5
+  alpha: 0.9
+  momentum: 0.9
   clip: 0
 
-step_optimizer_every: 4
-step_optimizer_nth_step: 3
-communicate_grad_every: 4
